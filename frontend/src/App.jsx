@@ -447,13 +447,13 @@ function App() {
     });
   };
 
-  const handleInstallPlugin = async (pluginId) => {
+  const handleInstallPlugin = async (pluginId, modelName = null) => {
     setPluginInstallStates(prev => ({ ...prev, [pluginId]: 'installing' }));
     try {
       const res = await fetch('http://localhost:8789/api/plugins/install', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pluginId })
+        body: JSON.stringify({ pluginId, modelName })
       });
       const data = await res.json();
       if (data.success) {
@@ -1636,14 +1636,31 @@ function App() {
             </div>
             <div className="modal-body">
               <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-                <div style={{ background: 'var(--bg-color)', padding: '1rem', borderRadius: '4px', border: '1px solid var(--border-color)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div style={{ background: 'var(--bg-color)', padding: '1rem', borderRadius: '4px', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
                   <div>
-                    <h4 style={{ margin: '0 0 0.25rem 0', color: 'var(--text-primary)' }}>Ollama Integration</h4>
-                    <p style={{ margin: 0, fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Run Llama, Mistral, and other local models.</p>
+                    <h4 style={{ margin: '0 0 0.25rem 0', color: 'var(--text-primary)' }}>Download Local Models</h4>
+                    <p style={{ margin: 0, fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Pull any Ollama model in the background.</p>
                   </div>
-                  <button onClick={() => handleInstallPlugin('ollama-tinydolphin')} disabled={pluginInstallStates['ollama-tinydolphin'] === 'installing' || pluginInstallStates['ollama-tinydolphin'] === 'installed'} style={{ background: pluginInstallStates['ollama-tinydolphin'] === 'installed' ? 'var(--bg-color)' : 'var(--text-primary)', border: pluginInstallStates['ollama-tinydolphin'] === 'installed' ? '1px solid #2ecc71' : 'none', color: pluginInstallStates['ollama-tinydolphin'] === 'installed' ? '#2ecc71' : 'var(--bg-color)', padding: '0.4rem 0.8rem', borderRadius: '4px', cursor: pluginInstallStates['ollama-tinydolphin'] === 'installing' || pluginInstallStates['ollama-tinydolphin'] === 'installed' ? 'not-allowed' : 'pointer', fontSize: '0.8rem', fontWeight: 'bold' }}>
-                    {pluginInstallStates['ollama-tinydolphin'] === 'installing' ? 'Installing... ⏳' : pluginInstallStates['ollama-tinydolphin'] === 'installed' ? 'Installed ✅' : 'Install'}
-                  </button>
+                  <div style={{ display: 'flex', gap: '0.5rem' }}>
+                    <input 
+                      type="text" 
+                      id="ollama-model-input" 
+                      placeholder="e.g. qwen2.5-coder:14b" 
+                      style={{ flex: 1, padding: '0.5rem', borderRadius: '4px', border: '1px solid var(--border-color)', background: 'var(--surface-color)', color: 'var(--text-primary)', outline: 'none' }} 
+                    />
+                    <button 
+                      onClick={() => {
+                        const val = document.getElementById('ollama-model-input').value;
+                        if(val) {
+                          handleInstallPlugin('ollama', val);
+                          document.getElementById('ollama-model-input').value = '';
+                        }
+                      }} 
+                      style={{ background: 'var(--text-primary)', color: 'var(--bg-color)', border: 'none', padding: '0.4rem 0.8rem', borderRadius: '4px', cursor: 'pointer', fontSize: '0.8rem', fontWeight: 'bold' }}
+                    >
+                      Download
+                    </button>
+                  </div>
                 </div>
                 
                 <div style={{ background: 'var(--bg-color)', padding: '1rem', borderRadius: '4px', border: '1px solid var(--border-color)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>

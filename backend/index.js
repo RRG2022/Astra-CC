@@ -505,28 +505,24 @@ app.post('/api/tools/fs/write', (req, res) => {
 // (Removed duplicate terminal/run)
 
 app.post('/api/plugins/install', (req, res) => {
-  const { pluginId } = req.body;
+  const { pluginId, modelName } = req.body;
   if (!pluginId) return res.status(400).json({ success: false, error: 'Missing pluginId' });
 
-  if (pluginId === 'ollama-tinydolphin' || pluginId === 'ollama-llama3') {
-    const model = pluginId.split('-')[1];
-    const child = spawn('ollama', ['pull', model]);
+  if (pluginId === 'ollama') {
+    const targetModel = modelName || 'tinydolphin';
+    console.log(`[Ollama] Starting background pull for ${targetModel}...`);
     
-    child.stdout.on('data', data => console.log(`[Ollama Pull ${model}]:`, data.toString()));
-    child.stderr.on('data', data => console.error(`[Ollama Pull ${model}]:`, data.toString()));
+    const child = spawn('ollama', ['pull', targetModel]);
     
-    child.on('close', code => {
+    child.on('close', (code) => {
       if (code === 0) {
-        console.log(`Successfully installed ${model}.`);
-        // Use a short delay before returning to ensure logs flush
-        setTimeout(() => res.json({ success: true, message: `Successfully installed ${model}.` }), 500);
+        console.log(`[Ollama] Successfully installed ${targetModel}.`);
       } else {
-        res.status(500).json({ success: false, error: `Failed to install ${model} with exit code ${code}` });
+        console.error(`[Ollama] Failed to install ${targetModel} with exit code ${code}`);
       }
     });
-    child.on('error', err => {
-      res.status(500).json({ success: false, error: `Error spawning ollama: ${err.message}` });
-    });
+
+    return res.json({ success: true, message: `Download started for ${targetModel} in the background. Check your terminal for progress.` });
   } else {
     // For other plugins, simulate a short installation delay
     setTimeout(() => {
