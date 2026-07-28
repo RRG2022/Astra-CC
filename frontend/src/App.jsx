@@ -7,6 +7,19 @@ import LiveTerminal from './components/LiveTerminal';
 import FileExplorer from './components/FileExplorer';
 import './index.css';
 
+const CURATED_OLLAMA_MODELS = [
+  { id: 'llama3.1', name: 'Llama 3.1', size: '8B', desc: 'Meta\'s latest highly capable open model.' },
+  { id: 'llama3', name: 'Llama 3', size: '8B', desc: 'Meta\'s powerful 8B parameter model.' },
+  { id: 'qwen2.5-coder', name: 'Qwen 2.5 Coder', size: '7B', desc: 'Alibaba\'s state-of-the-art coding model.' },
+  { id: 'mistral', name: 'Mistral', size: '7B', desc: 'The 7B model by Mistral AI, highly capable.' },
+  { id: 'mixtral', name: 'Mixtral', size: '8x7B', desc: 'Mistral\'s sparse mixture of experts model.' },
+  { id: 'phi3', name: 'Phi 3 Mini', size: '3.8B', desc: 'Microsoft\'s lightweight and capable model.' },
+  { id: 'gemma2', name: 'Gemma 2', size: '9B', desc: 'Google\'s Gemma 2 open models.' },
+  { id: 'llava', name: 'Llava', size: '7B', desc: 'Vision-language model capable of image chat.' },
+  { id: 'codellama', name: 'Code Llama', size: '7B', desc: 'Meta\'s code generation model.' },
+  { id: 'tinydolphin', name: 'TinyDolphin', size: '1.1B', desc: 'Very small experimental model.' },
+];
+
 const PERSONAS = {
   'repo_builder': {
     name: 'Repo Builder',
@@ -437,6 +450,8 @@ function App() {
   const [pluginInstallStates, setPluginInstallStates] = useState({});
   const [marketplacePlugins, setMarketplacePlugins] = useState([]);
   const [activeDownloads, setActiveDownloads] = useState({});
+  const [ollamaSearch, setOllamaSearch] = useState('');
+  const [showOllamaDropdown, setShowOllamaDropdown] = useState(false);
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -1684,21 +1699,54 @@ function App() {
                 <div style={{ background: 'var(--bg-color)', padding: '1rem', borderRadius: '4px', border: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
                   <div>
                     <h4 style={{ margin: '0 0 0.25rem 0', color: 'var(--text-primary)' }}>Download Local Models</h4>
-                    <p style={{ margin: 0, fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Pull any Ollama model in the background.</p>
+                    <p style={{ margin: 0, fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Search and pull Ollama models in the background.</p>
                   </div>
-                  <div style={{ display: 'flex', gap: '0.5rem' }}>
-                    <input 
-                      type="text" 
-                      id="ollama-model-input" 
-                      placeholder="e.g. qwen2.5-coder:14b" 
-                      style={{ flex: 1, padding: '0.5rem', borderRadius: '4px', border: '1px solid var(--border-color)', background: 'var(--surface-color)', color: 'var(--text-primary)', outline: 'none' }} 
-                    />
+                  <div style={{ display: 'flex', gap: '0.5rem', position: 'relative' }}>
+                    <div style={{ flex: 1, position: 'relative' }}>
+                      <input 
+                        type="text" 
+                        value={ollamaSearch}
+                        onChange={(e) => {
+                          setOllamaSearch(e.target.value);
+                          setShowOllamaDropdown(true);
+                        }}
+                        onFocus={() => setShowOllamaDropdown(true)}
+                        onBlur={() => setTimeout(() => setShowOllamaDropdown(false), 200)}
+                        placeholder="Search for a model (e.g. qwen2.5-coder)" 
+                        style={{ width: '100%', padding: '0.5rem', borderRadius: '4px', border: '1px solid var(--border-color)', background: 'var(--surface-color)', color: 'var(--text-primary)', outline: 'none' }} 
+                      />
+                      {showOllamaDropdown && (
+                        <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, marginTop: '4px', background: 'var(--surface-color)', border: '1px solid var(--border-color)', borderRadius: '4px', zIndex: 1000, maxHeight: '200px', overflowY: 'auto', boxShadow: '0 4px 12px rgba(0,0,0,0.5)' }}>
+                          {CURATED_OLLAMA_MODELS.filter(m => m.id.toLowerCase().includes(ollamaSearch.toLowerCase()) || m.name.toLowerCase().includes(ollamaSearch.toLowerCase())).length > 0 ? (
+                            CURATED_OLLAMA_MODELS.filter(m => m.id.toLowerCase().includes(ollamaSearch.toLowerCase()) || m.name.toLowerCase().includes(ollamaSearch.toLowerCase())).map(model => (
+                              <div 
+                                key={model.id} 
+                                onClick={() => {
+                                  setOllamaSearch(model.id);
+                                  setShowOllamaDropdown(false);
+                                }}
+                                style={{ padding: '0.5rem', borderBottom: '1px solid var(--border-color)', cursor: 'pointer', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}
+                              >
+                                <div>
+                                  <div style={{ fontWeight: 'bold', color: 'var(--text-primary)', fontSize: '0.85rem' }}>{model.name} <span style={{ color: 'var(--text-secondary)', fontWeight: 'normal' }}>({model.id})</span></div>
+                                  <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>{model.desc}</div>
+                                </div>
+                                <div style={{ fontSize: '0.75rem', color: 'var(--text-accent)', background: 'rgba(255,255,255,0.1)', padding: '2px 6px', borderRadius: '4px' }}>{model.size}</div>
+                              </div>
+                            ))
+                          ) : (
+                            <div style={{ padding: '0.5rem', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                              Press Download to pull custom model "{ollamaSearch}"
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
                     <button 
                       onClick={() => {
-                        const val = document.getElementById('ollama-model-input').value;
-                        if(val) {
-                          handleInstallPlugin('ollama', val);
-                          document.getElementById('ollama-model-input').value = '';
+                        if(ollamaSearch) {
+                          handleInstallPlugin('ollama', ollamaSearch);
+                          setOllamaSearch('');
                         }
                       }} 
                       style={{ background: 'var(--text-primary)', color: 'var(--bg-color)', border: 'none', padding: '0.4rem 0.8rem', borderRadius: '4px', cursor: 'pointer', fontSize: '0.8rem', fontWeight: 'bold' }}
