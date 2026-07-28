@@ -208,6 +208,12 @@ function App() {
   };
 
   const startOrchestration = async () => {
+    if (!orchestrationTask.trim()) return;
+    setOrchHistory(prev => {
+      const filtered = prev.filter(q => q !== orchestrationTask.trim());
+      return [orchestrationTask.trim(), ...filtered].slice(0, 50);
+    });
+    setOrchHistoryIndex(-1);
     setIsOrchestrating(true);
     setOrchestrationLogs([{ role: 'system', text: 'Starting multi-agent orchestration for: ' + orchestrationTask }]);
     try {
@@ -266,6 +272,7 @@ function App() {
     localStorage.setItem('astra_prompt_history', JSON.stringify(promptHistory));
   }, [promptHistory]);
   const [historyIndex, setHistoryIndex] = useState(-1);
+  const [tempPrompt, setTempPrompt] = useState('');
   const [attachments, setAttachments] = useState([]);
   const [isListening, setIsListening] = useState(false);
   const fileInputRef = useRef(null);
@@ -470,14 +477,26 @@ function App() {
     localStorage.setItem('astra_search_history', JSON.stringify(searchHistory));
   }, [searchHistory]);
 
+  const [searchHistoryIndex, setSearchHistoryIndex] = useState(-1);
+  const [orchHistory, setOrchHistory] = useState(() => {
+    const saved = localStorage.getItem('astra_orch_history');
+    return saved ? JSON.parse(saved) : [];
+  });
+  const [orchHistoryIndex, setOrchHistoryIndex] = useState(-1);
+  
+  useEffect(() => {
+    localStorage.setItem('astra_orch_history', JSON.stringify(orchHistory));
+  }, [orchHistory]);
+
   const handleSearch = async () => {
     if (!searchQuery.trim()) return;
     setIsSearching(true);
     
     setSearchHistory(prev => {
       const filtered = prev.filter(q => q !== searchQuery.trim());
-      return [searchQuery.trim(), ...filtered].slice(0, 10);
+      return [searchQuery.trim(), ...filtered].slice(0, 50);
     });
+    setSearchHistoryIndex(-1);
 
     try {
       const res = await fetch('http://localhost:8789/api/fs/search', {
@@ -686,8 +705,14 @@ function App() {
 
     let userText = textToSubmit.trim();
     if (overrideInput === null) {
-      setPromptHistory(prev => [userText, ...prev]);
+      if (userText) {
+        setPromptHistory(prev => {
+          const filtered = prev.filter(q => q !== userText);
+          return [userText, ...filtered].slice(0, 50);
+        });
+      }
       setHistoryIndex(-1);
+      setTempPrompt('');
       setInput('');
       if (isListening) toggleListening(); // Stop mic if sending
     }
@@ -1062,7 +1087,24 @@ function App() {
                       list="search-history-list"
                       value={searchQuery} 
                       onChange={(e) => setSearchQuery(e.target.value)}
-                      onKeyDown={(e) => { if (e.key === 'Enter') handleSearch(); }}
+                      onKeyDown={(e) => { 
+                        if (e.key === 'Enter') handleSearch(); 
+                        else if (e.key === 'ArrowUp') {
+                          if (searchHistory.length > 0 && searchHistoryIndex < searchHistory.length - 1) {
+                            e.preventDefault();
+                            const nextIndex = searchHistoryIndex + 1;
+                            setSearchHistoryIndex(nextIndex);
+                            setSearchQuery(searchHistory[nextIndex]);
+                          }
+                        } else if (e.key === 'ArrowDown') {
+                          if (searchHistoryIndex >= 0) {
+                            e.preventDefault();
+                            const prevIndex = searchHistoryIndex - 1;
+                            setSearchHistoryIndex(prevIndex);
+                            setSearchQuery(prevIndex >= 0 ? searchHistory[prevIndex] : '');
+                          }
+                        }
+                      }}
                       placeholder="Search files..."
                       style={{ flex: 1, background: 'var(--surface-color)', border: '1px solid var(--border-color)', padding: '0.5rem', color: 'var(--text-primary)', borderRadius: '4px', outline: 'none' }}
                     />
@@ -1123,9 +1165,32 @@ function App() {
                 <div style={{ padding: '0 1rem 1rem', flex: 1, display: 'flex', flexDirection: 'column', gap: '1rem', overflowY: 'auto' }}>
                   <textarea 
                     value={orchestrationTask} 
-                    onChange={e => setOrchestrationTask(e.target.value)} 
+                    onChange={e => {
+                      setOrchestrationTask(e.target.value);
+                      setOrchHistoryIndex(-1);
+                    }} 
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        startOrchestration();
+                      } else if (e.key === 'ArrowUp') {
+                        if (orchHistory.length > 0 && orchHistoryIndex < orchHistory.length - 1) {
+                          e.preventDefault();
+                          const nextIndex = orchHistoryIndex + 1;
+                          setOrchHistoryIndex(nextIndex);
+                          setOrchestrationTask(orchHistory[nextIndex]);
+                        }
+                      } else if (e.key === 'ArrowDown') {
+                        if (orchHistoryIndex >= 0) {
+                          e.preventDefault();
+                          const prevIndex = orchHistoryIndex - 1;
+                          setOrchHistoryIndex(prevIndex);
+                          setOrchestrationTask(prevIndex >= 0 ? orchHistory[prevIndex] : '');
+                        }
+                      }
+                    }}
                     placeholder="Describe a complex task for multiple agents..."
-                    style={{ background: 'var(--surface-color)', border: '1px solid var(--border-color)', color: 'var(--text-primary)', padding: '0.5rem', borderRadius: '4px', resize: 'vertical', minHeight: '80px' }}
+                    style={{ background: 'var(--surface-color)', border: '1px solid var(--border-color)', color: 'var(--text-primary)', padding: '0.5rem', borderRadius: '4px', resize: 'vertical', minHeight: '80px', outline: 'none' }}
                   />
                   <button onClick={startOrchestration} disabled={isOrchestrating} style={{ background: 'var(--text-primary)', color: 'var(--bg-color)', border: 'none', padding: '0.5rem', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}>
                     {isOrchestrating ? 'Orchestrating...' : 'Start Orchestration'}
@@ -1416,6 +1481,7 @@ function App() {
                   } else if (e.key === 'ArrowUp') {
                     if (promptHistory.length > 0 && historyIndex < promptHistory.length - 1) {
                       e.preventDefault();
+                      if (historyIndex === -1) setTempPrompt(input);
                       const nextIndex = historyIndex + 1;
                       setHistoryIndex(nextIndex);
                       setInput(promptHistory[nextIndex]);
@@ -1425,7 +1491,7 @@ function App() {
                       e.preventDefault();
                       const prevIndex = historyIndex - 1;
                       setHistoryIndex(prevIndex);
-                      setInput(prevIndex >= 0 ? promptHistory[prevIndex] : '');
+                      setInput(prevIndex >= 0 ? promptHistory[prevIndex] : tempPrompt);
                     }
                   }
                 }}
@@ -1475,7 +1541,7 @@ function App() {
                       disabled={!input.trim() && attachments.length === 0} 
                       title="Send"
                       style={{ 
-                        color: (!input.trim() && attachments.length === 0) ? 'var(--text-secondary)' : '#ffffff', 
+                        color: (!input.trim() && attachments.length === 0) ? 'var(--text-secondary)' : 'var(--bg-color)', 
                         background: (!input.trim() && attachments.length === 0) ? 'var(--border-color)' : 'var(--text-primary)',
                         border: '1px solid var(--border-color)', 
                         borderRadius: '6px', 

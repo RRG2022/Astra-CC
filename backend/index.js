@@ -224,22 +224,62 @@ app.post('/api/chat', async (req, res) => {
   try {
     const { model, messages, stream, tools } = req.body;
     
-    if (stream) {
-      const response = await axios({
+    const attemptRequest = async (useTools) => {
+      const payload = { model, messages, stream, tools: useTools ? tools : undefined };
+      if (!useTools) delete payload.tools;
+      
+      return await axios({
         method: 'post',
         url: `${OLLAMA_BASE_URL}/api/chat`,
-        data: { model, messages, stream: true, tools },
-        responseType: 'stream'
+        data: payload,
+        responseType: stream ? 'stream' : 'json',
+        validateStatus: false // Prevent Axios from throwing on 400
       });
+    };
+
+    let response = await attemptRequest(true);
+
+    if (response.status === 400) {
+      let errMsg = '';
+      if (stream) {
+        errMsg = await new Promise((resolve) => {
+           let data = '';
+           response.data.on('data', chunk => data += chunk.toString());
+           response.data.on('end', () => resolve(data));
+        });
+      } else {
+        errMsg = JSON.stringify(response.data);
+      }
       
+      if (errMsg.includes('does not support tools')) {
+        console.log(`[Ollama] Model ${model} does not support tools. Retrying without tools...`);
+        // Strip out any tool-related messages to avoid invalid role errors on retry
+        const cleanedMessages = messages.filter(m => m.role !== 'tool').map(m => {
+          const { tool_calls, ...rest } = m;
+          return rest;
+        });
+        
+        const retryPayload = { model, messages: cleanedMessages, stream };
+        const retryResponse = await axios({
+          method: 'post',
+          url: `${OLLAMA_BASE_URL}/api/chat`,
+          data: retryPayload,
+          responseType: stream ? 'stream' : 'json'
+        });
+        
+        if (stream) {
+          return retryResponse.data.pipe(res);
+        } else {
+          return res.json(retryResponse.data);
+        }
+      } else {
+         return res.status(400).send(errMsg);
+      }
+    }
+
+    if (stream) {
       response.data.pipe(res);
     } else {
-      const response = await axios.post(`${OLLAMA_BASE_URL}/api/chat`, {
-        model,
-        messages,
-        stream: false,
-        tools
-      });
       res.json(response.data);
     }
   } catch (error) {
