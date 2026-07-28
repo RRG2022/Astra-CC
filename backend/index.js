@@ -504,6 +504,42 @@ app.post('/api/tools/fs/write', (req, res) => {
 
 // (Removed duplicate terminal/run)
 
+app.get('/api/plugins/marketplace', (req, res) => {
+  const plugins = [
+    {
+      id: 'github',
+      name: 'GitHub Integration',
+      description: 'Create PRs, issues, and manage repos.',
+      action: 'Install'
+    },
+    {
+      id: 'external-models',
+      name: 'External Models (Gemini/Claude)',
+      description: 'Add API keys for Google and Anthropic models.',
+      action: 'Configure'
+    },
+    {
+      id: 'docker',
+      name: 'Docker Support',
+      description: 'Manage containers and images from the IDE.',
+      action: 'Install'
+    },
+    {
+      id: 'prettier',
+      name: 'Prettier Formatter',
+      description: 'Auto-format your code on save.',
+      action: 'Install'
+    }
+  ];
+  res.json({ success: true, plugins });
+});
+
+const activeDownloads = {};
+
+app.get('/api/plugins/downloads', (req, res) => {
+  res.json({ success: true, downloads: activeDownloads });
+});
+
 app.post('/api/plugins/install', (req, res) => {
   const { pluginId, modelName } = req.body;
   if (!pluginId) return res.status(400).json({ success: false, error: 'Missing pluginId' });
@@ -512,14 +548,27 @@ app.post('/api/plugins/install', (req, res) => {
     const targetModel = modelName || 'tinydolphin';
     console.log(`[Ollama] Starting background pull for ${targetModel}...`);
     
+    activeDownloads[targetModel] = { status: 'starting' };
+    
     const child = spawn('ollama', ['pull', targetModel]);
     
+    child.stdout.on('data', (data) => {
+      const text = data.toString().trim();
+      const lines = text.split('\n');
+      if (lines.length > 0) {
+        activeDownloads[targetModel].status = lines[lines.length - 1].trim();
+      }
+    });
+
     child.on('close', (code) => {
       if (code === 0) {
         console.log(`[Ollama] Successfully installed ${targetModel}.`);
+        activeDownloads[targetModel].status = 'completed';
       } else {
         console.error(`[Ollama] Failed to install ${targetModel} with exit code ${code}`);
+        activeDownloads[targetModel].status = 'failed';
       }
+      setTimeout(() => { delete activeDownloads[targetModel]; }, 10000);
     });
 
     return res.json({ success: true, message: `Download started for ${targetModel} in the background. Check your terminal for progress.` });

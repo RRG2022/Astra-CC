@@ -435,6 +435,36 @@ function App() {
   const [showWebSearchConfig, setShowWebSearchConfig] = useState(false);
   const [showPluginInstaller, setShowPluginInstaller] = useState(false);
   const [pluginInstallStates, setPluginInstallStates] = useState({});
+  const [marketplacePlugins, setMarketplacePlugins] = useState([]);
+  const [activeDownloads, setActiveDownloads] = useState({});
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      fetch('http://localhost:8789/api/plugins/downloads')
+        .then(res => res.json())
+        .then(data => {
+          if (data && data.success) {
+            setActiveDownloads(data.downloads || {});
+          }
+        })
+        .catch(() => {});
+    }, 1500);
+    return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    if (showPluginInstaller && marketplacePlugins.length === 0) {
+      fetch('http://localhost:8789/api/plugins/marketplace')
+        .then(res => res.json())
+        .then(data => {
+          if (data && data.success && data.plugins) {
+            setMarketplacePlugins(data.plugins);
+          }
+        })
+        .catch(err => console.error('Failed to load marketplace plugins', err));
+    }
+  }, [showPluginInstaller]);
+
   const [fsEnabled, setFsEnabled] = useState(() => {
     return localStorage.getItem('astra_fs_enabled') !== 'false';
   });
@@ -1571,6 +1601,21 @@ function App() {
 
 
       {/* Toast Notification */}
+      {Object.keys(activeDownloads).length > 0 && (
+        <div style={{ position: 'absolute', top: '1rem', right: '1rem', zIndex: 500, display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+          {Object.entries(activeDownloads).map(([model, info]) => (
+            <div key={model} style={{ background: 'var(--surface-color)', border: '1px solid var(--border-color)', borderRadius: '6px', padding: '0.75rem', color: 'var(--text-primary)', fontSize: '0.8rem', width: '250px', boxShadow: '0 4px 12px rgba(0,0,0,0.5)' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.25rem' }}>
+                <strong style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>Downloading {model}</strong>
+              </div>
+              <div style={{ color: 'var(--text-secondary)', fontSize: '0.75rem', fontFamily: 'monospace' }}>
+                {info.status}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
       {toastNotification && (
         <div style={{
           position: 'fixed',
@@ -1662,21 +1707,40 @@ function App() {
                     </button>
                   </div>
                 </div>
-                
-                <div style={{ background: 'var(--bg-color)', padding: '1rem', borderRadius: '4px', border: '1px solid var(--border-color)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <div>
-                    <h4 style={{ margin: '0 0 0.25rem 0', color: 'var(--text-primary)' }}>GitHub Integration</h4>
-                    <p style={{ margin: 0, fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Create PRs, issues, and manage repos.</p>
+                {marketplacePlugins.map((plugin) => (
+                  <div key={plugin.id} style={{ background: 'var(--bg-color)', padding: '1rem', borderRadius: '4px', border: '1px solid var(--border-color)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <div>
+                      <h4 style={{ margin: '0 0 0.25rem 0', color: 'var(--text-primary)' }}>{plugin.name}</h4>
+                      <p style={{ margin: 0, fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{plugin.description}</p>
+                    </div>
+                    <button 
+                      onClick={() => {
+                        if (plugin.action === 'Configure') {
+                          setShowSettings(true);
+                          setShowPluginInstaller(false);
+                        } else {
+                          handleInstallPlugin(plugin.id);
+                        }
+                      }} 
+                      disabled={pluginInstallStates[plugin.id] === 'installing' || pluginInstallStates[plugin.id] === 'installed'}
+                      style={{ 
+                        background: pluginInstallStates[plugin.id] === 'installed' ? 'var(--bg-color)' : 'var(--text-primary)', 
+                        border: pluginInstallStates[plugin.id] === 'installed' ? '1px solid #2ecc71' : 'none', 
+                        color: pluginInstallStates[plugin.id] === 'installed' ? '#2ecc71' : 'var(--bg-color)', 
+                        padding: '0.4rem 0.8rem', borderRadius: '4px', 
+                        cursor: pluginInstallStates[plugin.id] === 'installing' || pluginInstallStates[plugin.id] === 'installed' ? 'not-allowed' : 'pointer', 
+                        fontSize: '0.8rem', fontWeight: 'bold' 
+                      }}>
+                      {pluginInstallStates[plugin.id] === 'installing' ? 'Installing... ⏳' : pluginInstallStates[plugin.id] === 'installed' ? 'Installed ✅' : plugin.action}
+                    </button>
                   </div>
-                  <button onClick={() => setShowPluginInstaller(false)} style={{ background: 'var(--text-primary)', border: 'none', color: 'var(--bg-color)', padding: '0.4rem 0.8rem', borderRadius: '4px', cursor: 'pointer', fontSize: '0.8rem', fontWeight: 'bold' }}>Install</button>
-                </div>
+                ))}
                 
-                <div style={{ background: 'var(--bg-color)', padding: '1rem', borderRadius: '4px', border: '1px solid var(--border-color)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <div>
-                    <h4 style={{ margin: '0 0 0.25rem 0', color: 'var(--text-primary)' }}>External Models (Gemini/Claude)</h4>
-                    <p style={{ margin: 0, fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Add API keys for Google and Anthropic models.</p>
-                  </div>
-                  <button onClick={() => { setShowPluginInstaller(false); setShowSettings(true); }} style={{ background: 'var(--text-primary)', border: 'none', color: 'var(--bg-color)', padding: '0.4rem 0.8rem', borderRadius: '4px', cursor: 'pointer', fontSize: '0.8rem', fontWeight: 'bold' }}>Configure</button>
+                <div style={{ marginTop: '1rem', borderTop: '1px solid var(--border-color)', paddingTop: '1rem', textAlign: 'center' }}>
+                  <a href="https://marketplace.visualstudio.com/" target="_blank" rel="noreferrer" style={{ color: 'var(--text-secondary)', textDecoration: 'none', fontSize: '0.8rem', display: 'inline-flex', alignItems: 'center', gap: '0.5rem' }}>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
+                    Explore External Ecosystem Marketplace
+                  </a>
                 </div>
               </div>
             </div>
