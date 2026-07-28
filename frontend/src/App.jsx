@@ -427,6 +427,41 @@ function App() {
   const [isOrchestrating, setIsOrchestrating] = useState(false);
   const [showWebSearchConfig, setShowWebSearchConfig] = useState(false);
   const [showPluginInstaller, setShowPluginInstaller] = useState(false);
+  const [pluginInstallStates, setPluginInstallStates] = useState({});
+  const [fsEnabled, setFsEnabled] = useState(() => {
+    return localStorage.getItem('astra_fs_enabled') !== 'false';
+  });
+  
+  const handleToggleFs = () => {
+    setFsEnabled(prev => {
+      const next = !prev;
+      localStorage.setItem('astra_fs_enabled', next);
+      return next;
+    });
+  };
+
+  const handleInstallPlugin = async (pluginId) => {
+    setPluginInstallStates(prev => ({ ...prev, [pluginId]: 'installing' }));
+    try {
+      const res = await fetch('http://localhost:8789/api/plugins/install', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ pluginId })
+      });
+      const data = await res.json();
+      if (data.success) {
+        setPluginInstallStates(prev => ({ ...prev, [pluginId]: 'installed' }));
+        setToastNotification({ title: 'Success', message: data.message });
+      } else {
+        setPluginInstallStates(prev => ({ ...prev, [pluginId]: 'error' }));
+        setToastNotification({ title: 'Error', message: data.error });
+      }
+    } catch (e) {
+      setPluginInstallStates(prev => ({ ...prev, [pluginId]: 'error' }));
+      setToastNotification({ title: 'Error', message: 'Failed to connect to backend.' });
+    }
+  };
+
   const [searchHistory, setSearchHistory] = useState(() => {
     const saved = localStorage.getItem('astra_search_history');
     return saved ? JSON.parse(saved) : [];
@@ -997,8 +1032,13 @@ function App() {
               <>
                 <div style={{ padding: '0.75rem 1rem', fontSize: '0.7rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px', color: 'var(--text-secondary)' }}>Explorer</div>
                 <div className="fs-browser-inline" style={{ flex: 1, overflowY: 'auto', padding: '0.5rem', background: '#1e1e1e' }}>
-                  <FileExplorer 
-                    workspacePath={workspacePath} 
+                  {!fsEnabled ? (
+                    <div style={{ color: 'var(--text-secondary)', fontSize: '0.8rem', textAlign: 'center', marginTop: '2rem' }}>
+                      File System access is currently disabled. Go to Tools & Plugins to enable it.
+                    </div>
+                  ) : (
+                    <FileExplorer 
+                      workspacePath={workspacePath} 
                     onFileSelect={(fileData) => {
                       setOpenFilesMain(prev => prev.find(f => f.name === fileData.name) ? prev : [...prev, fileData]);
                       setActiveFileIdMain(fileData.name);
@@ -1008,6 +1048,7 @@ function App() {
                       setActiveFileIdSplit(fileData.name);
                     }}
                   />
+                  )}
                 </div>
               </>
             )}
@@ -1114,7 +1155,9 @@ function App() {
                     <div style={{ background: 'var(--surface-color)', padding: '1rem', borderRadius: '4px', border: '1px solid var(--border-color)' }}>
                       <h4 style={{ margin: '0 0 0.5rem 0', color: 'var(--text-primary)' }}>File System</h4>
                       <p style={{ margin: 0, fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Full read/write access to local files.</p>
-                      <button style={{ marginTop: '0.75rem', background: 'var(--text-primary)', border: 'none', color: 'var(--bg-color)', padding: '0.4rem 0.8rem', borderRadius: '4px', cursor: 'pointer', fontSize: '0.8rem', fontWeight: 'bold' }}>Enabled</button>
+                      <button onClick={handleToggleFs} style={{ marginTop: '0.75rem', background: fsEnabled ? 'var(--text-primary)' : 'var(--surface-color)', border: fsEnabled ? 'none' : '1px solid var(--border-color)', color: fsEnabled ? 'var(--bg-color)' : 'var(--text-secondary)', padding: '0.4rem 0.8rem', borderRadius: '4px', cursor: 'pointer', fontSize: '0.8rem', fontWeight: fsEnabled ? 'bold' : 'normal' }}>
+                        {fsEnabled ? 'Enabled' : 'Disabled'}
+                      </button>
                     </div>
                     <div onClick={() => setShowPluginInstaller(true)} style={{ background: 'var(--surface-color)', padding: '1rem', borderRadius: '4px', border: '1px dashed var(--border-color)', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>
                       <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>+ Install New Plugin</span>
@@ -1532,7 +1575,9 @@ function App() {
                     <h4 style={{ margin: '0 0 0.25rem 0', color: 'var(--text-primary)' }}>Ollama Integration</h4>
                     <p style={{ margin: 0, fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Run Llama, Mistral, and other local models.</p>
                   </div>
-                  <button onClick={() => setShowPluginInstaller(false)} style={{ background: 'var(--text-primary)', border: 'none', color: 'var(--bg-color)', padding: '0.4rem 0.8rem', borderRadius: '4px', cursor: 'pointer', fontSize: '0.8rem', fontWeight: 'bold' }}>Install</button>
+                  <button onClick={() => handleInstallPlugin('ollama-tinydolphin')} disabled={pluginInstallStates['ollama-tinydolphin'] === 'installing' || pluginInstallStates['ollama-tinydolphin'] === 'installed'} style={{ background: pluginInstallStates['ollama-tinydolphin'] === 'installed' ? 'var(--bg-color)' : 'var(--text-primary)', border: pluginInstallStates['ollama-tinydolphin'] === 'installed' ? '1px solid #2ecc71' : 'none', color: pluginInstallStates['ollama-tinydolphin'] === 'installed' ? '#2ecc71' : 'var(--bg-color)', padding: '0.4rem 0.8rem', borderRadius: '4px', cursor: pluginInstallStates['ollama-tinydolphin'] === 'installing' || pluginInstallStates['ollama-tinydolphin'] === 'installed' ? 'not-allowed' : 'pointer', fontSize: '0.8rem', fontWeight: 'bold' }}>
+                    {pluginInstallStates['ollama-tinydolphin'] === 'installing' ? 'Installing... ⏳' : pluginInstallStates['ollama-tinydolphin'] === 'installed' ? 'Installed ✅' : 'Install'}
+                  </button>
                 </div>
                 
                 <div style={{ background: 'var(--bg-color)', padding: '1rem', borderRadius: '4px', border: '1px solid var(--border-color)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
