@@ -425,6 +425,8 @@ function App() {
   const [orchestrationTask, setOrchestrationTask] = useState('');
   const [orchestrationLogs, setOrchestrationLogs] = useState([]);
   const [isOrchestrating, setIsOrchestrating] = useState(false);
+  const [showWebSearchConfig, setShowWebSearchConfig] = useState(false);
+  const [showPluginInstaller, setShowPluginInstaller] = useState(false);
   const [searchHistory, setSearchHistory] = useState(() => {
     const saved = localStorage.getItem('astra_search_history');
     return saved ? JSON.parse(saved) : [];
@@ -1107,14 +1109,14 @@ function App() {
                     <div style={{ background: 'var(--surface-color)', padding: '1rem', borderRadius: '4px', border: '1px solid var(--border-color)' }}>
                       <h4 style={{ margin: '0 0 0.5rem 0', color: 'var(--text-primary)' }}>Web Search</h4>
                       <p style={{ margin: 0, fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Allow agents to browse the internet.</p>
-                      <button style={{ marginTop: '0.75rem', background: 'var(--bg-color)', border: '1px solid var(--border-color)', color: 'var(--text-primary)', padding: '0.4rem 0.8rem', borderRadius: '4px', cursor: 'pointer', fontSize: '0.8rem' }}>Configure</button>
+                      <button onClick={() => setShowWebSearchConfig(true)} style={{ marginTop: '0.75rem', background: 'var(--bg-color)', border: '1px solid var(--border-color)', color: 'var(--text-primary)', padding: '0.4rem 0.8rem', borderRadius: '4px', cursor: 'pointer', fontSize: '0.8rem' }}>Configure</button>
                     </div>
                     <div style={{ background: 'var(--surface-color)', padding: '1rem', borderRadius: '4px', border: '1px solid var(--border-color)' }}>
                       <h4 style={{ margin: '0 0 0.5rem 0', color: 'var(--text-primary)' }}>File System</h4>
                       <p style={{ margin: 0, fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Full read/write access to local files.</p>
                       <button style={{ marginTop: '0.75rem', background: 'var(--text-primary)', border: 'none', color: 'var(--bg-color)', padding: '0.4rem 0.8rem', borderRadius: '4px', cursor: 'pointer', fontSize: '0.8rem', fontWeight: 'bold' }}>Enabled</button>
                     </div>
-                    <div style={{ background: 'var(--surface-color)', padding: '1rem', borderRadius: '4px', border: '1px dashed var(--border-color)', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>
+                    <div onClick={() => setShowPluginInstaller(true)} style={{ background: 'var(--surface-color)', padding: '1rem', borderRadius: '4px', border: '1px dashed var(--border-color)', display: 'flex', alignItems: 'center', justifyContent: 'center', cursor: 'pointer' }}>
                       <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>+ Install New Plugin</span>
                     </div>
                   </div>
@@ -1482,6 +1484,75 @@ function App() {
             <button onClick={() => setToastNotification(null)} style={{ background: 'transparent', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer', padding: 0 }}><X size={14} /></button>
           </div>
           <span style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>{toastNotification.message}</span>
+        </div>
+      )}
+
+      {/* Web Search Config Modal */}
+      {showWebSearchConfig && (
+        <div className="modal-overlay" onClick={() => setShowWebSearchConfig(false)}>
+          <div className="modal-content" onClick={e => e.stopPropagation()} style={{ width: '400px' }}>
+            <div className="modal-header">
+              <h2>Configure Web Search</h2>
+              <button onClick={() => setShowWebSearchConfig(false)} className="close-btn"><X size={20} /></button>
+            </div>
+            <div className="modal-body">
+              <div className="form-group">
+                <label style={{ display: 'block', marginBottom: '0.5rem', color: 'var(--text-primary)', fontSize: '0.9rem' }}>Search Provider</label>
+                <select style={{ width: '100%', padding: '0.5rem', background: 'var(--bg-color)', color: 'var(--text-primary)', border: '1px solid var(--border-color)', borderRadius: '4px', marginBottom: '1rem' }}>
+                  <option>Brave Search (Recommended)</option>
+                  <option>Google Custom Search</option>
+                  <option>Bing Search</option>
+                </select>
+              </div>
+              <div className="form-group">
+                <label style={{ display: 'block', marginBottom: '0.5rem', color: 'var(--text-primary)', fontSize: '0.9rem' }}>API Key</label>
+                <input type="password" placeholder="Enter API Key" style={{ width: '100%', padding: '0.5rem', background: 'var(--bg-color)', color: 'var(--text-primary)', border: '1px solid var(--border-color)', borderRadius: '4px' }} />
+              </div>
+            </div>
+            <div className="modal-footer" style={{ marginTop: '1.5rem', display: 'flex', justifyContent: 'flex-end', gap: '0.5rem' }}>
+              <button onClick={() => setShowWebSearchConfig(false)} style={{ background: 'var(--bg-color)', border: '1px solid var(--border-color)', color: 'var(--text-primary)', padding: '0.5rem 1rem', borderRadius: '4px', cursor: 'pointer' }}>Cancel</button>
+              <button onClick={() => setShowWebSearchConfig(false)} style={{ background: 'var(--text-primary)', border: 'none', color: 'var(--bg-color)', padding: '0.5rem 1rem', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold' }}>Save</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Plugin Installer Modal */}
+      {showPluginInstaller && (
+        <div className="modal-overlay" onClick={() => setShowPluginInstaller(false)}>
+          <div className="modal-content" onClick={e => e.stopPropagation()} style={{ width: '500px' }}>
+            <div className="modal-header">
+              <h2>Install Plugin</h2>
+              <button onClick={() => setShowPluginInstaller(false)} className="close-btn"><X size={20} /></button>
+            </div>
+            <div className="modal-body">
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                <div style={{ background: 'var(--bg-color)', padding: '1rem', borderRadius: '4px', border: '1px solid var(--border-color)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <div>
+                    <h4 style={{ margin: '0 0 0.25rem 0', color: 'var(--text-primary)' }}>Ollama Integration</h4>
+                    <p style={{ margin: 0, fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Run Llama, Mistral, and other local models.</p>
+                  </div>
+                  <button onClick={() => setShowPluginInstaller(false)} style={{ background: 'var(--text-primary)', border: 'none', color: 'var(--bg-color)', padding: '0.4rem 0.8rem', borderRadius: '4px', cursor: 'pointer', fontSize: '0.8rem', fontWeight: 'bold' }}>Install</button>
+                </div>
+                
+                <div style={{ background: 'var(--bg-color)', padding: '1rem', borderRadius: '4px', border: '1px solid var(--border-color)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <div>
+                    <h4 style={{ margin: '0 0 0.25rem 0', color: 'var(--text-primary)' }}>GitHub Integration</h4>
+                    <p style={{ margin: 0, fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Create PRs, issues, and manage repos.</p>
+                  </div>
+                  <button onClick={() => setShowPluginInstaller(false)} style={{ background: 'var(--text-primary)', border: 'none', color: 'var(--bg-color)', padding: '0.4rem 0.8rem', borderRadius: '4px', cursor: 'pointer', fontSize: '0.8rem', fontWeight: 'bold' }}>Install</button>
+                </div>
+                
+                <div style={{ background: 'var(--bg-color)', padding: '1rem', borderRadius: '4px', border: '1px solid var(--border-color)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <div>
+                    <h4 style={{ margin: '0 0 0.25rem 0', color: 'var(--text-primary)' }}>External Models (Gemini/Claude)</h4>
+                    <p style={{ margin: 0, fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Add API keys for Google and Anthropic models.</p>
+                  </div>
+                  <button onClick={() => { setShowPluginInstaller(false); setShowSettings(true); }} style={{ background: 'var(--text-primary)', border: 'none', color: 'var(--bg-color)', padding: '0.4rem 0.8rem', borderRadius: '4px', cursor: 'pointer', fontSize: '0.8rem', fontWeight: 'bold' }}>Configure</button>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
       )}
 
