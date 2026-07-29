@@ -147,21 +147,21 @@ app.post('/api/settings', (req, res) => {
 
 // Proxy to get models from Ollama + External
 app.get('/api/models', async (req, res) => {
-  try {
-    const settings = getSettings();
     let externalModels = [];
-    if (settings.apiKeys.openai) externalModels.push({ name: 'gpt-4o', family: 'openai' });
-    if (settings.apiKeys.anthropic) externalModels.push({ name: 'claude-3-opus', family: 'anthropic' });
-    if (settings.apiKeys.gemini) externalModels.push({ name: 'gemini-1.5-pro', family: 'google' });
-
-    const response = await axios.get(`${OLLAMA_BASE_URL}/api/tags`);
-    const data = response.data;
-    data.models = [...externalModels, ...(data.models || [])];
-    res.json(data);
-  } catch (error) {
-    console.error('Error fetching models from Ollama:', error.message);
-    res.json({ models: [{ name: 'gpt-4o', family: 'openai' }, { name: 'claude-3-opus', family: 'anthropic' }, { name: 'gemini-1.5-pro', family: 'google' }] });
-  }
+    try {
+      const settings = getSettings();
+      if (settings.apiKeys.openai) externalModels.push({ name: 'gpt-4o', family: 'openai' });
+      if (settings.apiKeys.anthropic) externalModels.push({ name: 'claude-3-opus', family: 'anthropic' });
+      if (settings.apiKeys.gemini) externalModels.push({ name: 'gemini-1.5-pro', family: 'google' });
+  
+      const response = await axios.get(`${OLLAMA_BASE_URL}/api/tags`);
+      const data = response.data;
+      data.models = [...externalModels, ...(data.models || [])];
+      res.json(data);
+    } catch (error) {
+      console.error('Error fetching models from Ollama:', error.message);
+      res.json({ models: externalModels });
+    }
 });
 
 app.post('/api/models/pull', (req, res) => {
@@ -302,6 +302,110 @@ app.post('/api/tools/fs/read', (req, res) => {
     }
     const content = fs.readFileSync(absolutePath, 'utf8');
     res.json({ success: true, content });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Agent Tool: File System (List Directory)
+app.post('/api/tools/fs/list', (req, res) => {
+  const { directoryPath, workspacePath } = req.body;
+  
+  try {
+    const absolutePath = directoryPath && workspacePath 
+        ? path.resolve(workspacePath, directoryPath) 
+        : (directoryPath ? path.resolve(directoryPath) : workspacePath);
+        
+    if (!fs.existsSync(absolutePath)) {
+      return res.status(404).json({ error: `Directory not found: ${absolutePath}` });
+    }
+    
+    if (!fs.statSync(absolutePath).isDirectory()) {
+      return res.status(400).json({ error: `Path is not a directory: ${absolutePath}` });
+    }
+
+    const items = fs.readdirSync(absolutePath).map(file => {
+      try {
+        const stats = fs.statSync(path.join(absolutePath, file));
+        return {
+          name: file,
+          isDirectory: stats.isDirectory(),
+          size: stats.size
+        };
+      } catch(e) {
+        return { name: file, isDirectory: false, size: 0, error: true };
+      }
+    });
+    
+    res.json({ success: true, path: absolutePath, items });
+  } catch (error) {
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Agent Tool: File System (Grep Search)
+app.post('/api/tools/fs/grep', (req, res) => {
+  const { query, directoryPath, workspacePath } = req.body;
+  if (!query) {
+    return res.status(400).json({ error: 'query is required' });
+  }
+  
+  try {
+    const absolutePath = directoryPath && workspacePath 
+        ? path.resolve(workspacePath, directoryPath) 
+        : (directoryPath ? path.resolve(directoryPath) : (workspacePath || process.cwd()));
+        
+    if (!fs.existsSync(absolutePath)) {
+      return res.status(404).json({ error: `Directory not found: ${absolutePath}` });
+    }
+
+    const results = [];
+    
+    function searchRecursive(currentPath) {
+      if (results.length >= 50) return; // Limit to 50 results
+      
+      let items;
+      try {
+        items = fs.readdirSync(currentPath);
+      } catch(e) { return; }
+      
+      for (const item of items) {
+        if (results.length >= 50) break;
+        if (item === 'node_modules' || item === '.git' || item === 'dist' || item === 'build' || item === '.next') continue;
+        
+        const itemPath = path.join(currentPath, item);
+        let stat;
+        try {
+          stat = fs.statSync(itemPath);
+        } catch(e) { continue; }
+        
+        if (stat.isDirectory()) {
+          searchRecursive(itemPath);
+        } else if (stat.isFile()) {
+          try {
+            // Only read first 250KB to avoid large binaries
+            if (stat.size > 250000) continue;
+            
+            const content = fs.readFileSync(itemPath, 'utf8');
+            const lines = content.split('\n');
+            lines.forEach((line, index) => {
+              if (line.includes(query) && results.length < 50) {
+                results.push({
+                  file: path.relative(workspacePath || absolutePath, itemPath),
+                  line: index + 1,
+                  content: line.trim()
+                });
+              }
+            });
+          } catch(e) {
+            // skip unreadable/binary
+          }
+        }
+      }
+    }
+    
+    searchRecursive(absolutePath);
+    res.json({ success: true, count: results.length, results });
   } catch (error) {
     res.status(500).json({ success: false, error: error.message });
   }
@@ -552,11 +656,24 @@ app.post('/api/plugins/install', (req, res) => {
     
     const child = spawn('ollama', ['pull', targetModel]);
     
+    child.on('error', (err) => {
+      console.error(`[Ollama] Failed to start pull for ${targetModel}:`, err.message);
+      activeDownloads[targetModel].status = 'failed: Ollama not found or not running';
+      setTimeout(() => { delete activeDownloads[targetModel]; }, 10000);
+    });
+
     child.stdout.on('data', (data) => {
       const text = data.toString().trim();
       const lines = text.split('\n');
       if (lines.length > 0) {
         activeDownloads[targetModel].status = lines[lines.length - 1].trim();
+      }
+    });
+
+    child.stderr.on('data', (data) => {
+      const text = data.toString().trim();
+      if (text) {
+        activeDownloads[targetModel].status = text.substring(0, 100);
       }
     });
 

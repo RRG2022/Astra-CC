@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
+import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
+import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import Editor from '@monaco-editor/react';
 import { Play, FileText, Check, AlertCircle, Terminal, FileCode, Folder, XOctagon, CheckCircle, AlertTriangle, Paperclip, Mic, MicOff, Copy, Edit2, X, ChevronDown, ChevronRight, MessageSquare, Plus, RefreshCw, Save, Settings, Trash2, ArrowUp, Send, Search, Users, Puzzle } from 'lucide-react';
 import InteractiveTerminal from './components/InteractiveTerminal';
@@ -76,6 +78,35 @@ const TOOLS = [
         required: ['command', 'reason']
       }
     }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'list_dir',
+      description: 'List files and directories in a given path',
+      parameters: {
+        type: 'object',
+        properties: {
+          directoryPath: { type: 'string', description: 'Relative path to directory' }
+        },
+        required: ['directoryPath']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'grep_search',
+      description: 'Search for a string pattern across files in the workspace (ignores node_modules and .git automatically)',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'The text or regex pattern to search for' },
+          directoryPath: { type: 'string', description: 'Relative path to directory to search in (optional). Defaults to workspace root.' }
+        },
+        required: ['query']
+      }
+    }
   }
 ];
 const ToolExecution = ({ tool }) => {
@@ -135,7 +166,7 @@ function App() {
   const [isLinting, setIsLinting] = useState(false);
 
   const [abortController, setAbortController] = useState(null);
-  const [authorityLevel, setAuthorityLevel] = useState('Supervised');
+  const [authorityLevel, setAuthorityLevel] = useState(() => localStorage.getItem('astra_authority_level') || 'Supervised');
   const [pendingTool, setPendingTool] = useState(null);
   const [tools, setTools] = useState(() => {
     const saved = localStorage.getItem('astra_tools');
@@ -415,6 +446,15 @@ function App() {
     setMessages(newMessages);
   };
 
+  const handleRegenerateFrom = (index) => {
+    if (isGenerating) return;
+    const userMessage = messages[index].content;
+    const strippedMessage = userMessage.split('\n\n--- Attached File:')[0];
+    const newMessages = messages.slice(0, index);
+    setMessages(newMessages);
+    handleSend(strippedMessage, newMessages);
+  };
+
   const handleCopy = (text) => {
     navigator.clipboard.writeText(text);
   };
@@ -452,6 +492,7 @@ function App() {
   const [activeDownloads, setActiveDownloads] = useState({});
   const [ollamaSearch, setOllamaSearch] = useState('');
   const [showOllamaDropdown, setShowOllamaDropdown] = useState(false);
+  const [modelsLoaded, setModelsLoaded] = useState(false);
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -463,7 +504,7 @@ function App() {
           }
         })
         .catch(() => {});
-    }, 1500);
+    }, 1000);
     return () => clearInterval(interval);
   }, []);
 
@@ -597,14 +638,19 @@ function App() {
     try {
       const res = await fetch('http://localhost:8789/api/models');
       const data = await res.json();
-      if (data.models && data.models.length > 0) {
+      if (data.models) {
         setModels(data.models);
-        // Default to qwen2.5-coder:14b if it exists, otherwise the first model
-        const qwenModel = data.models.find(m => m.name.includes('qwen2.5-coder:14b'));
-        setSelectedModel(qwenModel ? qwenModel.name : data.models[0].name);
+        if (data.models.length > 0) {
+          const qwenModel = data.models.find(m => m.name.includes('qwen2.5-coder:14b'));
+          setSelectedModel(qwenModel ? qwenModel.name : data.models[0].name);
+        } else {
+          setSelectedModel('');
+        }
       }
+      setModelsLoaded(true);
     } catch (err) {
       console.error('Failed to fetch models:', err);
+      setModelsLoaded(true);
     }
   };
 
@@ -670,9 +716,27 @@ function App() {
         }
         return JSON.stringify(data);
       }
+      else if (name === 'list_dir') {
+        const res = await fetch('http://localhost:8789/api/tools/fs/list', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ...argsObj, workspacePath })
+        });
+        const data = await res.json();
+        return JSON.stringify(data);
+      }
+      else if (name === 'grep_search') {
+        const res = await fetch('http://localhost:8789/api/tools/fs/grep', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ...argsObj, workspacePath })
+        });
+        const data = await res.json();
+        return JSON.stringify(data);
+      }
       return JSON.stringify({ error: 'Unknown tool' });
-    } catch (e) {
-      return JSON.stringify({ error: e.message });
+    } catch(err) {
+      return JSON.stringify({ error: err.message });
     } finally {
       setActiveTool(null);
     }
@@ -914,6 +978,17 @@ function App() {
             <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
               <label style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Gemini API Key</label>
               <input type="password" value={settingsForm.gemini || ''} onChange={e => setSettingsForm({...settingsForm, gemini: e.target.value})} style={{ background: 'var(--surface-color)', border: '1px solid var(--border-color)', color: 'var(--text-primary)', padding: '0.5rem', borderRadius: '4px' }} />
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+              <label style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Agent Authority Level</label>
+              <select value={authorityLevel} onChange={e => {
+                setAuthorityLevel(e.target.value);
+                localStorage.setItem('astra_authority_level', e.target.value);
+              }} style={{ background: 'var(--surface-color)', border: '1px solid var(--border-color)', color: 'var(--text-primary)', padding: '0.5rem', borderRadius: '4px' }}>
+                <option value="Strict">Strict (Approve everything)</option>
+                <option value="Supervised">Supervised (Approve modifying tools)</option>
+                <option value="Autonomous">Autonomous (No approval required)</option>
+              </select>
             </div>
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.5rem', marginTop: '1rem' }}>
               <button onClick={() => setShowSettings(false)} style={{ background: 'transparent', border: '1px solid var(--border-color)', color: 'var(--text-primary)', padding: '0.5rem 1rem', borderRadius: '4px', cursor: 'pointer' }}>Cancel</button>
@@ -1470,9 +1545,14 @@ function App() {
                 <div className="message-actions" style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem', justifyContent: 'flex-end' }}>
 
                     {msg.role === 'user' ? (
-                      <button className="action-btn" title="Edit Prompt" onClick={() => handleEditMessage(msg.content, idx)}>
-                        <Edit2 size={14} />
-                      </button>
+                      <>
+                        <button className="action-btn" title="Edit Prompt" onClick={() => handleEditMessage(msg.content, idx)}>
+                          <Edit2 size={14} />
+                        </button>
+                        <button className="action-btn" title="Regenerate from here" onClick={() => handleRegenerateFrom(idx)}>
+                          <RefreshCw size={14} />
+                        </button>
+                      </>
                     ) : null}
                     <button className="action-btn" title="Copy to Clipboard" onClick={() => handleCopy(msg.content)}>
                       <Copy size={14} />
@@ -1559,7 +1639,8 @@ function App() {
                       onChange={(e) => setSelectedModel(e.target.value)}
                       style={{ background: 'transparent', border: 'none', color: 'var(--text-secondary)', fontSize: '0.75rem', cursor: 'pointer', outline: 'none', padding: 0, maxWidth: '140px', textOverflow: 'ellipsis' }}
                     >
-                      {models.length === 0 && <option>Loading...</option>}
+                      {!modelsLoaded && <option>Loading...</option>}
+                      {modelsLoaded && models.length === 0 && <option value="">No local models</option>}
                       {models.map(m => (
                         <option key={m.name} value={m.name}>{m.name}</option>
                       ))}
@@ -1617,7 +1698,7 @@ function App() {
 
       {/* Toast Notification */}
       {Object.keys(activeDownloads).length > 0 && (
-        <div style={{ position: 'absolute', top: '1rem', right: '1rem', zIndex: 500, display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+        <div style={{ position: 'fixed', bottom: '1rem', left: '1rem', zIndex: 500, display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
           {Object.entries(activeDownloads).map(([model, info]) => (
             <div key={model} style={{ background: 'var(--surface-color)', border: '1px solid var(--border-color)', borderRadius: '6px', padding: '0.75rem', color: 'var(--text-primary)', fontSize: '0.8rem', width: '250px', boxShadow: '0 4px 12px rgba(0,0,0,0.5)' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.25rem' }}>
@@ -1721,7 +1802,7 @@ function App() {
                             CURATED_OLLAMA_MODELS.filter(m => m.id.toLowerCase().includes(ollamaSearch.toLowerCase()) || m.name.toLowerCase().includes(ollamaSearch.toLowerCase())).map(model => (
                               <div 
                                 key={model.id} 
-                                onClick={() => {
+                                onMouseDown={() => {
                                   setOllamaSearch(model.id);
                                   setShowOllamaDropdown(false);
                                 }}
@@ -1749,9 +1830,10 @@ function App() {
                           setOllamaSearch('');
                         }
                       }} 
+                      disabled={pluginInstallStates['ollama'] === 'installing'}
                       style={{ background: 'var(--text-primary)', color: 'var(--bg-color)', border: 'none', padding: '0.4rem 0.8rem', borderRadius: '4px', cursor: 'pointer', fontSize: '0.8rem', fontWeight: 'bold' }}
                     >
-                      Download
+                      {pluginInstallStates['ollama'] === 'installing' ? 'Starting...' : 'Download'}
                     </button>
                   </div>
                 </div>
