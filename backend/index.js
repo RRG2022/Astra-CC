@@ -726,14 +726,28 @@ wss.on('connection', (ws, req) => {
   
   const shell = os.platform() === 'win32' ? 'powershell.exe' : 'bash';
   
-  const ptyProcess = pty.spawn(shell, [], {
-    name: 'xterm-color',
-    cols: parseInt(url.searchParams.get('cols') || '80', 10),
-    rows: parseInt(url.searchParams.get('rows') || '24', 10),
-    cwd: cwd,
-    env: process.env
-  });
+  let validCwd = process.cwd();
+  if (cwd) {
+    try {
+      if (fs.existsSync(cwd)) validCwd = cwd;
+    } catch(e) {}
+  }
 
+  let ptyProcess;
+  try {
+    ptyProcess = pty.spawn(shell, [], {
+      name: 'xterm-color',
+      cols: parseInt(url.searchParams.get('cols') || '80', 10),
+      rows: parseInt(url.searchParams.get('rows') || '24', 10),
+      cwd: validCwd,
+      env: process.env
+    });
+  } catch (err) {
+    console.error('Failed to spawn PTY:', err);
+    ws.send('\\r\\nError: Failed to open terminal in the specified directory.\\r\\n');
+    ws.close();
+    return;
+  }
   ptyProcess.onData((data) => {
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(data);
