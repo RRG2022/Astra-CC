@@ -9,8 +9,33 @@ const http = require('http');
 const WebSocket = require('ws');
 const pty = require('node-pty');
 const os = require('os');
+const { resolveSafePath } = require('./security/safe-path');
+const { validatePluginName } = require('./plugins/plugin-policy');
 
 const app = express();
+
+// Middleware (Must be before routes)
+const ALLOWED_ORIGINS = ['http://localhost:5173', 'http://127.0.0.1:5173'];
+
+// Requests with no Origin (curl, local tooling) are allowed through; the
+// loopback bind on server.listen is what keeps those local. A request carrying
+// a foreign Origin is a browser request from another site and is refused.
+function isAllowedOrigin(origin) {
+  return !origin || ALLOWED_ORIGINS.includes(origin);
+}
+
+app.use(cors({ origin: ALLOWED_ORIGINS }));
+app.use(express.json({ limit: '50mb' }));
+app.use(morgan('dev'));
+
+// Explicit Origin Defense (Defense in Depth)
+app.use((req, res, next) => {
+  if (!isAllowedOrigin(req.headers.origin)) {
+    return res.status(403).json({ error: 'Forbidden: Invalid Origin' });
+  }
+  next();
+});
+
 
 // Plugins Architecture Scaffold
 const PLUGINS_DIR = path.join(__dirname, 'plugins');
@@ -32,19 +57,20 @@ app.get('/api/plugins', (req, res) => {
 // Execute a plugin dynamically
 app.post('/api/plugins/execute', (req, res) => {
   const { pluginName, args } = req.body;
-  const pluginPath = path.join(PLUGINS_DIR, pluginName + '.js');
-  if (fs.existsSync(pluginPath)) {
-    try {
+  try {
+    const validPluginName = validatePluginName(pluginName);
+    const pluginPath = path.join(PLUGINS_DIR, validPluginName + '.js');
+    if (fs.existsSync(pluginPath)) {
       const plugin = require(pluginPath);
       if (typeof plugin.execute === 'function') {
         const result = plugin.execute(args);
         return res.json({ success: true, result });
       }
-    } catch (e) {
-      return res.status(500).json({ success: false, error: e.message });
     }
+    res.status(404).json({ success: false, error: 'Plugin not found or invalid' });
+  } catch (e) {
+    return res.status(403).json({ success: false, error: e.message });
   }
-  res.status(404).json({ success: false, error: 'Plugin not found or invalid' });
 });
 
 // Output Stream Endpoint (SSE)
@@ -114,13 +140,22 @@ app.post('/api/problems', (req, res) => {
 const PORT = process.env.PORT || 8789;
 const server = http.createServer(app);
 
-// Middleware
-app.use(cors());
-app.use(morgan('dev'));
-app.use(express.json({ limit: '50mb' }));
-
+// Middleware moved to top
 // Ollama API configuration
 const OLLAMA_BASE_URL = 'http://localhost:11434';
+
+// Sampling and context defaults. Without an explicit num_ctx, Ollama runs every
+// model at its 4096 default regardless of what the model supports, so a single
+// read_file evicts the system prompt and the user's task from the window.
+// `keep_alive` is a top-level field, NOT an option — inside `options` it is
+// silently ignored.
+const OLLAMA_OPTIONS = {
+  num_ctx: parseInt(process.env.ASTRA_NUM_CTX || '8192', 10),
+  temperature: parseFloat(process.env.ASTRA_TEMPERATURE || '0.1'),
+  top_p: 0.9,
+  repeat_penalty: 1.05
+};
+const OLLAMA_KEEP_ALIVE = process.env.ASTRA_KEEP_ALIVE || '30m';
 
 // Health Check
 app.get('/api/health', (req, res) => {
@@ -168,6 +203,9 @@ app.post('/api/models/pull', (req, res) => {
   const { model } = req.body;
   // Spawn ollama pull in background
   const p = require('child_process').spawn('ollama', ['pull', model], { stdio: 'ignore', detached: true });
+  p.on('error', (err) => {
+    console.error('Failed to spawn ollama pull:', err.message);
+  });
   p.unref();
   res.json({ success: true, message: `Started pulling ${model} in background` });
 });
@@ -225,7 +263,14 @@ app.post('/api/chat', async (req, res) => {
     const { model, messages, stream, tools } = req.body;
     
     const attemptRequest = async (useTools) => {
-      const payload = { model, messages, stream, tools: useTools ? tools : undefined };
+      const payload = {
+        model,
+        messages,
+        stream,
+        tools: useTools ? tools : undefined,
+        options: OLLAMA_OPTIONS,
+        keep_alive: OLLAMA_KEEP_ALIVE
+      };
       if (!useTools) delete payload.tools;
       
       return await axios({
@@ -259,7 +304,13 @@ app.post('/api/chat', async (req, res) => {
           return rest;
         });
         
-        const retryPayload = { model, messages: cleanedMessages, stream };
+        const retryPayload = {
+          model,
+          messages: cleanedMessages,
+          stream,
+          options: OLLAMA_OPTIONS,
+          keep_alive: OLLAMA_KEEP_ALIVE
+        };
         const retryResponse = await axios({
           method: 'post',
           url: `${OLLAMA_BASE_URL}/api/chat`,
@@ -296,7 +347,7 @@ app.post('/api/tools/fs/read', (req, res) => {
   }
   
   try {
-    const absolutePath = workspacePath ? path.resolve(workspacePath, filePath) : path.resolve(filePath);
+    const absolutePath = workspacePath ? resolveSafePath(workspacePath, filePath) : path.resolve(filePath);
     if (!fs.existsSync(absolutePath)) {
       return res.status(404).json({ error: `File not found: ${absolutePath}` });
     }
@@ -313,8 +364,8 @@ app.post('/api/tools/fs/list', (req, res) => {
   
   try {
     const absolutePath = directoryPath && workspacePath 
-        ? path.resolve(workspacePath, directoryPath) 
-        : (directoryPath ? path.resolve(directoryPath) : workspacePath);
+      ? resolveSafePath(workspacePath, directoryPath) 
+      : (directoryPath ? path.resolve(directoryPath) : process.cwd());
         
     if (!fs.existsSync(absolutePath)) {
       return res.status(404).json({ error: `Directory not found: ${absolutePath}` });
@@ -352,8 +403,8 @@ app.post('/api/tools/fs/grep', (req, res) => {
   
   try {
     const absolutePath = directoryPath && workspacePath 
-        ? path.resolve(workspacePath, directoryPath) 
-        : (directoryPath ? path.resolve(directoryPath) : (workspacePath || process.cwd()));
+      ? resolveSafePath(workspacePath, directoryPath) 
+      : (directoryPath ? path.resolve(directoryPath) : process.cwd());
         
     if (!fs.existsSync(absolutePath)) {
       return res.status(404).json({ error: `Directory not found: ${absolutePath}` });
@@ -613,8 +664,9 @@ app.post('/api/tools/fs/write', (req, res) => {
   }
   
   try {
-    const absolutePath = workspacePath ? path.resolve(workspacePath, filePath) : path.resolve(filePath);
-    // Ensure directory exists
+    const absolutePath = workspacePath ? resolveSafePath(workspacePath, filePath) : path.resolve(filePath);
+    
+    // Create directories if they don't exist
     const dir = path.dirname(absolutePath);
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
@@ -718,7 +770,20 @@ app.post('/api/plugins/install', (req, res) => {
   }
 });
 
-const wss = new WebSocket.Server({ server, path: '/api/pty' });
+// WebSocket upgrades bypass Express middleware entirely, and the browser does
+// NOT apply CORS to WebSocket connections. Without this check any web page the
+// user visits can open ws://localhost:8789/api/pty and get an interactive
+// PowerShell session. The Origin header on a WS handshake is set by the browser
+// and cannot be forged by page script.
+const wss = new WebSocket.Server({
+  server,
+  path: '/api/pty',
+  verifyClient: ({ origin }, done) => {
+    if (isAllowedOrigin(origin)) return done(true);
+    console.error(`[PTY] Rejected WebSocket connection from origin: ${origin}`);
+    done(false, 403, 'Forbidden: Invalid Origin');
+  }
+});
 
 wss.on('connection', (ws, req) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
@@ -772,6 +837,6 @@ wss.on('connection', (ws, req) => {
   });
 });
 
-server.listen(PORT, () => {
-  console.log(`Astra Backend (with PTY) running on http://localhost:${PORT}`);
+server.listen(PORT, '127.0.0.1', () => {
+  console.log(`Astra Backend (with PTY) running on http://127.0.0.1:${PORT}`);
 });

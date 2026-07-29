@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
@@ -153,7 +153,9 @@ const ToolExecution = ({ tool }) => {
 
 function App() {
   const [models, setModels] = useState([]);
-  const [selectedModel, setSelectedModel] = useState('');
+  const [traceLogs, setTraceLogs] = useState([]);
+  const [selectedModel, setSelectedModel] = useState(() => localStorage.getItem('astra_model') || '');
+  useEffect(() => { if (selectedModel) localStorage.setItem('astra_model', selectedModel); }, [selectedModel]);
   const [selectedPersona, setSelectedPersona] = useState('repo_builder');
   const [workspacePath, setWorkspacePath] = useState(() => localStorage.getItem('astra_workspace') || '');
   const [messages, setMessages] = useState(() => {
@@ -879,15 +881,25 @@ function App() {
   };
 
   const streamOllama = async (apiMessages, agentMsgIndex, signal) => {
+    const payload = {
+      model: selectedModel,
+      messages: apiMessages,
+      ...(selectedModel.toLowerCase().includes('llama') || selectedModel.toLowerCase().includes('gpt') ? { tools: TOOLS } : {}),
+      stream: true
+    };
+    
+    const traceEntry = {
+      timestamp: Date.now(),
+      model: selectedModel,
+      requestPayload: payload,
+      rawBuffer: '',
+      parsedToolCalls: []
+    };
+
     const response = await fetch('http://localhost:8789/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: selectedModel,
-        messages: apiMessages,
-        tools: TOOLS,
-        stream: true
-      }),
+      body: JSON.stringify(payload),
       signal
     });
 
@@ -901,6 +913,7 @@ function App() {
       if (done) break;
 
       const chunk = decoder.decode(value, { stream: true });
+      traceEntry.rawBuffer += chunk;
       const lines = chunk.split('\n').filter(line => line.trim() !== '');
 
       for (const line of lines) {
@@ -941,6 +954,8 @@ function App() {
       }
     }
 
+    traceEntry.parsedToolCalls = toolCalls;
+    setTraceLogs(prev => [traceEntry, ...prev].slice(0, 100));
     return toolCalls;
   };
 
@@ -969,13 +984,13 @@ function App() {
     }
 
     const currentMessages = overrideMessages !== null ? overrideMessages : messages;
-    const userMessage = { role: 'user', content: userText };
+    const userMessage = { id: crypto.randomUUID(), role: 'user', content: userText };
     setMessages([...currentMessages, userMessage]);
     
     setIsGenerating(true);
 
     const agentMsgIndex = currentMessages.length + 1;
-    setMessages(prev => [...prev, { role: 'assistant', content: '', tool_executions: [] }]);
+    setMessages(prev => [...prev, { id: crypto.randomUUID(), role: 'assistant', content: '', tool_executions: [] }]);
 
     const controller = new AbortController();
     setAbortController(controller);
@@ -1438,6 +1453,35 @@ function App() {
         {/* Left Sidebar */}
         {isLeftSidebarOpen && (
           <div className="sidebar-panel" style={{ width: leftSidebarWidth, borderRight: '1px solid var(--border-color)', background: '#18181b', display: 'flex', flexDirection: 'column' }}>
+            {activeActivity === 'trace' && (
+              <>
+                <div style={{ padding: '0.75rem 1rem', fontSize: '0.7rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px', color: 'var(--text-secondary)' }}>
+                  Trace Logs
+                </div>
+                <div style={{ flex: 1, overflowY: 'auto', padding: '0 1rem 1rem' }}>
+                  {traceLogs.length === 0 ? (
+                    <div style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>No trace logs recorded yet.</div>
+                  ) : (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                      {traceLogs.map((log, idx) => (
+                        <div key={idx} style={{ background: 'var(--bg-color)', border: '1px solid var(--border-color)', borderRadius: '6px', padding: '0.75rem', fontSize: '0.8rem' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem', color: 'var(--text-secondary)', fontSize: '0.75rem' }}>
+                            <span style={{ fontWeight: 600 }}>Turn {traceLogs.length - idx}</span>
+                            <span>{new Date(log.timestamp).toLocaleTimeString()}</span>
+                          </div>
+                          <div style={{ marginBottom: '0.5rem' }}>
+                            <span style={{ color: '#aaa' }}>Model: </span> <span style={{ color: '#fff' }}>{log.model}</span>
+                          </div>
+                          <JSONPreview title="Request Payload (apiMessages & tools)" data={log.requestPayload} />
+                          <JSONPreview title="Raw Response Buffer (NDJSON chunks)" data={log.rawBuffer} isString={true} />
+                          <JSONPreview title="Parsed Tool Calls" data={log.parsedToolCalls} />
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
             {activeActivity === 'explorer' && (
               <>
                 <div style={{ padding: '0.75rem 1rem', fontSize: '0.7rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px', color: 'var(--text-secondary)' }}>Explorer</div>
@@ -2182,5 +2226,31 @@ function App() {
     </>
   );
 }
+
+
+const JSONPreview = ({ data, title, isString = false }) => {
+  const [expanded, setExpanded] = React.useState(false);
+  
+  return (
+    <details style={{ marginBottom: '0.5rem', cursor: 'pointer' }} onToggle={(e) => setExpanded(e.target.open)}>
+      <summary style={{ color: 'var(--accent-color)' }}>{title}</summary>
+      {expanded && (
+        <pre style={{ margin: '0.5rem 0', background: '#111', padding: '0.5rem', borderRadius: '4px', overflowX: 'auto', color: '#ccc', whiteSpace: isString ? 'pre-wrap' : 'pre', wordBreak: isString ? 'break-all' : 'normal' }}>
+          {(() => {
+            try {
+              const str = isString ? data : JSON.stringify(data, null, 2);
+              if (str && str.length > 50000) {
+                return str.substring(0, 50000) + '\n... [TRUNCATED FOR PERFORMANCE]';
+              }
+              return str || String(data);
+            } catch (e) {
+              return `Error rendering trace: ${e.message}`;
+            }
+          })()}
+        </pre>
+      )}
+    </details>
+  );
+};
 
 export default App;

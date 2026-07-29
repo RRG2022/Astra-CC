@@ -1,0 +1,1 @@
+const fs = require('fs'); const content = fs.readFileSync('index.js', 'utf8'); const lines = content.split('\n'); lines.forEach((l, i) => { if (l.includes('model') || l.includes('MODEL')) console.log((i+1) + ': ' + l); });
