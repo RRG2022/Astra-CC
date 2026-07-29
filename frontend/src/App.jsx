@@ -3,7 +3,7 @@ import ReactMarkdown from 'react-markdown';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import Editor from '@monaco-editor/react';
-import { Play, FileText, Check, AlertCircle, Terminal, FileCode, Folder, XOctagon, CheckCircle, AlertTriangle, Paperclip, Mic, MicOff, Copy, Edit2, X, ChevronDown, ChevronRight, MessageSquare, Plus, RefreshCw, Save, Settings, Trash2, ArrowUp, Send, Search, Users, Puzzle } from 'lucide-react';
+import { Play, FileText, Check, AlertCircle, Terminal, FileCode, Folder, XOctagon, CheckCircle, AlertTriangle, Paperclip, Mic, MicOff, Copy, Edit2, X, ChevronDown, ChevronRight, MessageSquare, Plus, RefreshCw, Save, Settings, Trash2, ArrowUp, Send, Search, Users, Puzzle, Brain } from 'lucide-react';
 import InteractiveTerminal from './components/InteractiveTerminal';
 import LiveTerminal from './components/LiveTerminal';
 import FileExplorer from './components/FileExplorer';
@@ -110,26 +110,40 @@ const TOOLS = [
   }
 ];
 const ToolExecution = ({ tool }) => {
-  const [expanded, setExpanded] = useState(true);
+  const [expanded, setExpanded] = useState(false);
   
   let taskId = null;
-  if (tool.result && tool.result.includes('[Task sent to background] Task ID: ')) {
-    const match = tool.result.match(/Task ID: ([a-f0-9-]+)/);
-    if (match) taskId = match[1];
+  if (tool.result && typeof tool.result === 'string' && tool.result.includes('taskId')) {
+    try {
+      const parsed = JSON.parse(tool.result);
+      if (parsed.taskId) taskId = parsed.taskId;
+    } catch(e) {}
   }
 
   return (
-    <div className="tool-execution-log">
-      <div className="tool-execution-header" onClick={() => setExpanded(!expanded)}>
-        {expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-        <span>🛠️ Executed <strong>{tool.name}</strong></span>
+    <div className="tool-execution-log" style={{ opacity: tool.status === 'running' ? 0.7 : 1 }}>
+      <div className="tool-execution-header" onClick={() => setExpanded(!expanded)} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', padding: '0.5rem', background: '#252526', border: '1px solid var(--border-color)', borderRadius: expanded || tool.status === 'running' ? '4px 4px 0 0' : '4px' }}>
+        {tool.status === 'running' ? <div className="tool-spinner" style={{ width: '12px', height: '12px', border: '2px solid #ccc', borderTopColor: 'transparent', borderRadius: '50%', animation: 'spin 1s linear infinite' }} /> : (expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />)}
+        <span style={{ fontSize: '0.85rem' }}>
+          {tool.status === 'running' ? 'Running' : 'Executed'} <strong style={{ color: '#4fc1ff' }}>{tool.name}</strong>
+        </span>
       </div>
-      {expanded && (
-        <div className="tool-execution-body">
-          {taskId ? (
-            <LiveTerminal taskId={taskId} />
+      {(expanded || tool.status === 'running') && (
+        <div className="tool-execution-body" style={{ padding: '0.5rem', background: '#1e1e1e', border: '1px solid var(--border-color)', borderTop: 'none', borderRadius: '0 0 4px 4px', fontSize: '0.8rem', color: '#ccc', overflowX: 'auto' }}>
+          {tool.status === 'running' ? (
+            <div>
+              <div style={{ color: '#888', marginBottom: '0.25rem' }}>Arguments:</div>
+              <pre style={{ margin: 0 }}>{JSON.stringify(tool.arguments, null, 2)}</pre>
+            </div>
           ) : (
-            <pre>{tool.result}</pre>
+            taskId ? (
+              <div>
+                <div style={{ color: '#888', marginBottom: '0.5rem' }}>[Task sent to background]</div>
+                <LiveTerminal taskId={taskId} />
+              </div>
+            ) : (
+              <pre style={{ margin: 0, whiteSpace: 'pre-wrap' }}>{tool.result}</pre>
+            )
           )}
         </div>
       )}
@@ -159,6 +173,8 @@ function App() {
   const [activeFileIdSplit, setActiveFileIdSplit] = useState(null);
   const [activeTask, setActiveTask] = useState(null);
   const [showTerminalPane, setShowTerminalPane] = useState(false);
+  const [wordWrap, setWordWrap] = useState(true);
+  const [minimapEnabled, setMinimapEnabled] = useState(false);
   const [shells, setShells] = useState([{ id: 'shell-1' }]);
   const [activeTerminalTab, setActiveTerminalTab] = useState('shell-1');
   const [outputLogs, setOutputLogs] = useState([]);
@@ -321,6 +337,26 @@ function App() {
   const [isListening, setIsListening] = useState(false);
   const fileInputRef = useRef(null);
   const messagesEndRef = useRef(null);
+
+  const editorRefMain = useRef(null);
+  const editorRefSplit = useRef(null);
+  
+  const handleEditorMainMount = (editor) => {
+    editorRefMain.current = editor;
+  };
+  
+  const handleEditorSplitMount = (editor) => {
+    editorRefSplit.current = editor;
+  };
+
+  const executeEditorAction = (actionId) => {
+    if (activeFileIdSplit && editorRefSplit.current && editorRefSplit.current.hasTextFocus()) {
+      editorRefSplit.current.trigger('keyboard', actionId, null);
+    } else if (editorRefMain.current) {
+      editorRefMain.current.trigger('keyboard', actionId, null);
+    }
+    setActiveMenu(null);
+  };
 
   useEffect(() => {
     fetchModels();
@@ -601,6 +637,106 @@ function App() {
     }
   };
 
+  const handleRunActiveFile = async () => {
+    if (!activeFileIdMain) return;
+    
+    // Auto-save if unsaved
+    await handleSaveFile(activeFileIdMain);
+    
+    let command = '';
+    if (activeFileIdMain.endsWith('.js') || activeFileIdMain.endsWith('.jsx')) {
+      command = `node "${activeFileIdMain}"`;
+    } else if (activeFileIdMain.endsWith('.py')) {
+      command = `python "${activeFileIdMain}"`;
+    } else if (activeFileIdMain.endsWith('.ts')) {
+      command = `npx ts-node "${activeFileIdMain}"`;
+    } else {
+      setToastNotification({ type: 'warning', message: 'No default runner for this file type' });
+      setTimeout(() => setToastNotification(null), 3000);
+      return;
+    }
+
+    try {
+      const res = await fetch('http://localhost:8789/api/tools/terminal/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command, workspacePath, cwd: '.' })
+      });
+      const data = await res.json();
+      if (data.taskId) {
+        setActiveTask(data.taskId);
+        setShowTerminalPane(true);
+        setActiveTerminalTab('task');
+        setToastNotification({ type: 'success', message: `Running ${activeFileIdMain.split('/').pop()}` });
+        setTimeout(() => setToastNotification(null), 3000);
+      }
+    } catch (err) {
+      console.error(err);
+      setToastNotification({ type: 'error', message: 'Failed to run file' });
+      setTimeout(() => setToastNotification(null), 3000);
+    }
+    setActiveMenu(null);
+  };
+
+  const handleNewTerminal = () => {
+    const newId = `shell-${Date.now()}`;
+    setShells([...shells, { id: newId }]);
+    setActiveTerminalTab(newId);
+    setShowTerminalPane(true);
+    setActiveMenu(null);
+  };
+
+  const handleCloseTerminal = () => {
+    if (activeTerminalTab.startsWith('shell-')) {
+      const newShells = shells.filter(s => s.id !== activeTerminalTab);
+      setShells(newShells);
+      setActiveTerminalTab(newShells[0] ? newShells[0].id : 'problems');
+    }
+    setActiveMenu(null);
+  };
+
+  const handleSaveFile = async (filePath) => {
+    const fileObj = openFilesMain.find(f => f.name === filePath) || openFilesSplit.find(f => f.name === filePath);
+    if (!fileObj || !fileObj.unsaved) return;
+    try {
+      const res = await fetch('http://localhost:8789/api/tools/fs/write', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filePath, content: fileObj.content, workspacePath })
+      });
+      const data = await res.json();
+      if (data.success) {
+        showToast('File saved successfully');
+        setOpenFilesMain(prev => prev.map(f => f.name === filePath ? { ...f, unsaved: false } : f));
+        setOpenFilesSplit(prev => prev.map(f => f.name === filePath ? { ...f, unsaved: false } : f));
+      }
+    } catch(e) {
+      console.error('Save failed', e);
+      showToast('Error saving file');
+    }
+  };
+
+  const handleNewFile = () => {
+    let i = 1;
+    while (openFilesMain.some(f => f.name === `Untitled-${i}`)) i++;
+    const newName = `Untitled-${i}`;
+    setOpenFilesMain(prev => [...prev, { name: newName, content: '', unsaved: true }]);
+    setActiveFileIdMain(newName);
+  };
+
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+        e.preventDefault();
+        if (activeFileIdMain) handleSaveFile(activeFileIdMain);
+        if (activeFileIdSplit) handleSaveFile(activeFileIdSplit);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [activeFileIdMain, activeFileIdSplit, openFilesMain, openFilesSplit, workspacePath]);
+
+
   // Auto-hide toast notification after 5 seconds
   useEffect(() => {
     if (toastNotification) {
@@ -870,7 +1006,25 @@ function App() {
 
         // Execute all tools
         for (const call of toolCalls) {
-          const needsApproval = authorityLevel === 'Strict' || (authorityLevel === 'Supervised' && ['write_file', 'run_command'].includes(call.function.name));
+          const callId = crypto.randomUUID();
+          
+          // Append pending state to visual indicator IMMEDIATELY
+          setMessages(prev => {
+             const newMessages = [...prev];
+             const msg = { ...newMessages[agentMsgIndex] };
+             msg.tool_executions = [...(msg.tool_executions || []), {
+               id: callId,
+               name: call.function.name,
+               arguments: call.function.arguments,
+               status: 'running',
+               result: null
+             }];
+             newMessages[agentMsgIndex] = msg;
+             return newMessages;
+          });
+
+          const currentAuthority = localStorage.getItem('astra_authority_level') || 'Supervised';
+          const needsApproval = currentAuthority === 'Strict' || (currentAuthority === 'Supervised' && ['write_file', 'run_command'].includes(call.function.name));
           
           let resultString = '';
           if (needsApproval) {
@@ -894,14 +1048,13 @@ function App() {
             name: call.function.name
           });
           
-          // Append to visual indicator
+          // Update visual indicator to completed
           setMessages(prev => {
              const newMessages = [...prev];
              const msg = { ...newMessages[agentMsgIndex] };
-             msg.tool_executions = [...(msg.tool_executions || []), {
-               name: call.function.name,
-               result: resultString
-             }];
+             msg.tool_executions = msg.tool_executions.map(t => 
+               t.id === callId ? { ...t, status: 'completed', result: resultString } : t
+             );
              newMessages[agentMsgIndex] = msg;
              return newMessages;
           });
@@ -1090,7 +1243,7 @@ function App() {
         </div>
       )}
       <div className="app-container" onClick={(e) => { if (activeMenu && !e.target.closest(".menu-bar")) setActiveMenu(null); }}>
-      <header style={{ display: 'flex', padding: 0, background: 'var(--surface-color)', overflow: 'hidden', borderBottom: '1px solid var(--border-color)' }}>
+      <header style={{ display: 'flex', padding: 0, background: 'var(--surface-color)', overflow: 'visible', borderBottom: '1px solid var(--border-color)', position: 'relative', zIndex: 50 }}>
         <div style={{ flex: 1, padding: '0.25rem 1rem', display: 'flex', alignItems: 'center', gap: '1.5rem' }}>
           <div className="brand" style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
             <div style={{ width: 16, height: 16, background: 'linear-gradient(135deg, #6366f1, #a855f7, #ec4899)', borderRadius: '4px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -1103,19 +1256,131 @@ function App() {
               <span style={{ cursor: 'pointer' }} onClick={() => setActiveMenu(activeMenu === 'file' ? null : 'file')}>File</span>
               {activeMenu === 'file' && (
                 <div style={{ position: 'absolute', top: '100%', left: 0, marginTop: '0.5rem', background: 'var(--surface-color)', border: '1px solid var(--border-color)', borderRadius: '4px', padding: '0.5rem', display: 'flex', flexDirection: 'column', gap: '0.5rem', minWidth: '150px', zIndex: 100 }}>
-                  <span style={{ cursor: 'pointer', padding: '0.25rem 0.5rem', borderRadius: '4px' }} className="menu-item" onClick={() => { setActiveMenu(null); console.log('New File'); }}>New File</span>
+                  <span style={{ cursor: 'pointer', padding: '0.25rem 0.5rem', borderRadius: '4px' }} className="menu-item" onClick={() => { setActiveMenu(null); handleNewFile(); }}>New File</span>
                   <span style={{ cursor: 'pointer', padding: '0.25rem 0.5rem', borderRadius: '4px' }} className="menu-item" onClick={() => { setActiveMenu(null); setShowBrowser(true); }}>Open Folder</span>
+                  <div style={{ height: '1px', background: 'var(--border-color)', margin: '0.25rem 0' }}></div>
+                  <span style={{ cursor: 'pointer', padding: '0.25rem 0.5rem', borderRadius: '4px', color: activeFileIdMain ? 'var(--text-primary)' : 'var(--text-secondary)' }} className="menu-item" onClick={() => { setActiveMenu(null); if (activeFileIdMain) handleSaveFile(activeFileIdMain); }}>Save</span>
+                  <span style={{ cursor: 'pointer', padding: '0.25rem 0.5rem', borderRadius: '4px', color: activeFileIdMain ? 'var(--text-primary)' : 'var(--text-secondary)' }} className="menu-item" onClick={() => { 
+                    setActiveMenu(null); 
+                    if (activeFileIdMain) {
+                      setOpenFilesMain(prev => prev.filter(x => x.name !== activeFileIdMain)); 
+                      setActiveFileIdMain(openFilesMain[0]?.name !== activeFileIdMain ? openFilesMain[0]?.name : openFilesMain[1]?.name || null);
+                    }
+                  }}>Close File</span>
                 </div>
               )}
             </div>
-            <span style={{ cursor: 'pointer' }} onClick={() => setActiveMenu(null)}>Edit</span>
-            <span style={{ cursor: 'pointer' }} onClick={() => setActiveMenu(null)}>Selection</span>
-            <span style={{ cursor: 'pointer' }} onClick={() => setActiveMenu(null)}>View</span>
-            <span style={{ cursor: 'pointer' }} onClick={() => setActiveMenu(null)}>Go</span>
-            <span style={{ cursor: 'pointer' }} onClick={() => setActiveMenu(null)}>Run</span>
-            <span style={{ cursor: 'pointer' }} onClick={() => { setActiveMenu(null); setShowTerminalPane(true); }}>Terminal</span>
-            <span style={{ cursor: 'pointer' }} onClick={() => { setActiveMenu(null); setShowSettings(true); }}>Settings</span>
-            <span style={{ cursor: 'pointer' }} onClick={() => setActiveMenu(null)}>Help</span>
+            <div style={{ position: 'relative' }}>
+              <span style={{ cursor: 'pointer' }} onClick={() => setActiveMenu(activeMenu === 'edit' ? null : 'edit')}>Edit</span>
+              {activeMenu === 'edit' && (
+                <div style={{ position: 'absolute', top: '100%', left: 0, marginTop: '0.5rem', background: 'var(--surface-color)', border: '1px solid var(--border-color)', borderRadius: '4px', padding: '0.5rem', display: 'flex', flexDirection: 'column', gap: '0.5rem', minWidth: '180px', zIndex: 100 }}>
+                  <span style={{ cursor: 'pointer', padding: '0.25rem 0.5rem', borderRadius: '4px' }} className="menu-item" onClick={() => executeEditorAction('undo')}>Undo</span>
+                  <span style={{ cursor: 'pointer', padding: '0.25rem 0.5rem', borderRadius: '4px' }} className="menu-item" onClick={() => executeEditorAction('redo')}>Redo</span>
+                  <div style={{ height: '1px', background: 'var(--border-color)', margin: '0.25rem 0' }}></div>
+                  <span style={{ cursor: 'pointer', padding: '0.25rem 0.5rem', borderRadius: '4px' }} className="menu-item" onClick={() => executeEditorAction('editor.action.clipboardCutAction')}>Cut</span>
+                  <span style={{ cursor: 'pointer', padding: '0.25rem 0.5rem', borderRadius: '4px' }} className="menu-item" onClick={() => executeEditorAction('editor.action.clipboardCopyAction')}>Copy</span>
+                  <span style={{ cursor: 'pointer', padding: '0.25rem 0.5rem', borderRadius: '4px' }} className="menu-item" onClick={() => executeEditorAction('editor.action.clipboardPasteAction')}>Paste</span>
+                  <div style={{ height: '1px', background: 'var(--border-color)', margin: '0.25rem 0' }}></div>
+                  <span style={{ cursor: 'pointer', padding: '0.25rem 0.5rem', borderRadius: '4px' }} className="menu-item" onClick={() => executeEditorAction('actions.find')}>Find</span>
+                  <span style={{ cursor: 'pointer', padding: '0.25rem 0.5rem', borderRadius: '4px' }} className="menu-item" onClick={() => executeEditorAction('editor.action.startFindReplaceAction')}>Replace</span>
+                </div>
+              )}
+            </div>
+            <div style={{ position: 'relative' }}>
+              <span style={{ cursor: 'pointer' }} onClick={() => setActiveMenu(activeMenu === 'selection' ? null : 'selection')}>Selection</span>
+              {activeMenu === 'selection' && (
+                <div style={{ position: 'absolute', top: '100%', left: 0, marginTop: '0.5rem', background: 'var(--surface-color)', border: '1px solid var(--border-color)', borderRadius: '4px', padding: '0.5rem', display: 'flex', flexDirection: 'column', gap: '0.5rem', minWidth: '180px', zIndex: 100 }}>
+                  <span style={{ cursor: 'pointer', padding: '0.25rem 0.5rem', borderRadius: '4px' }} className="menu-item" onClick={() => executeEditorAction('editor.action.selectAll')}>Select All</span>
+                  <div style={{ height: '1px', background: 'var(--border-color)', margin: '0.25rem 0' }}></div>
+                  <span style={{ cursor: 'pointer', padding: '0.25rem 0.5rem', borderRadius: '4px' }} className="menu-item" onClick={() => executeEditorAction('editor.action.smartSelect.expand')}>Expand Selection</span>
+                  <span style={{ cursor: 'pointer', padding: '0.25rem 0.5rem', borderRadius: '4px' }} className="menu-item" onClick={() => executeEditorAction('editor.action.smartSelect.shrink')}>Shrink Selection</span>
+                  <div style={{ height: '1px', background: 'var(--border-color)', margin: '0.25rem 0' }}></div>
+                  <span style={{ cursor: 'pointer', padding: '0.25rem 0.5rem', borderRadius: '4px' }} className="menu-item" onClick={() => executeEditorAction('editor.action.copyLinesUpAction')}>Copy Line Up</span>
+                  <span style={{ cursor: 'pointer', padding: '0.25rem 0.5rem', borderRadius: '4px' }} className="menu-item" onClick={() => executeEditorAction('editor.action.copyLinesDownAction')}>Copy Line Down</span>
+                  <span style={{ cursor: 'pointer', padding: '0.25rem 0.5rem', borderRadius: '4px' }} className="menu-item" onClick={() => executeEditorAction('editor.action.moveLinesUpAction')}>Move Line Up</span>
+                  <span style={{ cursor: 'pointer', padding: '0.25rem 0.5rem', borderRadius: '4px' }} className="menu-item" onClick={() => executeEditorAction('editor.action.moveLinesDownAction')}>Move Line Down</span>
+                </div>
+              )}
+            </div>
+            <div style={{ position: 'relative' }}>
+              <span style={{ cursor: 'pointer' }} onClick={() => setActiveMenu(activeMenu === 'view' ? null : 'view')}>View</span>
+              {activeMenu === 'view' && (
+                <div style={{ position: 'absolute', top: '100%', left: 0, marginTop: '0.5rem', background: 'var(--surface-color)', border: '1px solid var(--border-color)', borderRadius: '4px', padding: '0.5rem', display: 'flex', flexDirection: 'column', gap: '0.5rem', minWidth: '180px', zIndex: 100 }}>
+                  <span style={{ cursor: 'pointer', padding: '0.25rem 0.5rem', borderRadius: '4px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }} className="menu-item" onClick={() => { setWordWrap(!wordWrap); setActiveMenu(null); }}>
+                    Word Wrap <span>{wordWrap && '✓'}</span>
+                  </span>
+                  <span style={{ cursor: 'pointer', padding: '0.25rem 0.5rem', borderRadius: '4px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }} className="menu-item" onClick={() => { setMinimapEnabled(!minimapEnabled); setActiveMenu(null); }}>
+                    Minimap <span>{minimapEnabled && '✓'}</span>
+                  </span>
+                  <div style={{ height: '1px', background: 'var(--border-color)', margin: '0.25rem 0' }}></div>
+                  <span style={{ cursor: 'pointer', padding: '0.25rem 0.5rem', borderRadius: '4px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }} className="menu-item" onClick={() => { setShowTerminalPane(!showTerminalPane); setActiveMenu(null); }}>
+                    Terminal Panel <span>{showTerminalPane && '✓'}</span>
+                  </span>
+                </div>
+              )}
+            </div>
+            <div style={{ position: 'relative' }}>
+              <span style={{ cursor: 'pointer' }} onClick={() => setActiveMenu(activeMenu === 'go' ? null : 'go')}>Go</span>
+              {activeMenu === 'go' && (
+                <div style={{ position: 'absolute', top: '100%', left: 0, marginTop: '0.5rem', background: 'var(--surface-color)', border: '1px solid var(--border-color)', borderRadius: '4px', padding: '0.5rem', display: 'flex', flexDirection: 'column', gap: '0.5rem', minWidth: '180px', zIndex: 100 }}>
+                  <span style={{ cursor: 'pointer', padding: '0.25rem 0.5rem', borderRadius: '4px' }} className="menu-item" onClick={() => executeEditorAction('editor.action.gotoLine')}>Go to Line/Column...</span>
+                  <div style={{ height: '1px', background: 'var(--border-color)', margin: '0.25rem 0' }}></div>
+                  <span style={{ cursor: 'pointer', padding: '0.25rem 0.5rem', borderRadius: '4px' }} className="menu-item" onClick={() => executeEditorAction('editor.action.quickOutline')}>Go to Symbol in File...</span>
+                  <span style={{ cursor: 'pointer', padding: '0.25rem 0.5rem', borderRadius: '4px' }} className="menu-item" onClick={() => executeEditorAction('editor.action.revealDefinition')}>Go to Definition</span>
+                  <span style={{ cursor: 'pointer', padding: '0.25rem 0.5rem', borderRadius: '4px' }} className="menu-item" onClick={() => executeEditorAction('editor.action.referenceSearch.trigger')}>Go to References</span>
+                </div>
+              )}
+            </div>
+            <div style={{ position: 'relative' }}>
+              <span style={{ cursor: 'pointer' }} onClick={() => setActiveMenu(activeMenu === 'run' ? null : 'run')}>Run</span>
+              {activeMenu === 'run' && (
+                <div style={{ position: 'absolute', top: '100%', left: 0, marginTop: '0.5rem', background: 'var(--surface-color)', border: '1px solid var(--border-color)', borderRadius: '4px', padding: '0.5rem', display: 'flex', flexDirection: 'column', gap: '0.5rem', minWidth: '180px', zIndex: 100 }}>
+                  <span style={{ cursor: 'pointer', padding: '0.25rem 0.5rem', borderRadius: '4px', color: activeFileIdMain ? 'var(--text-primary)' : 'var(--text-secondary)' }} className="menu-item" onClick={handleRunActiveFile}>
+                    <Play size={14} style={{ display: 'inline', marginRight: '8px' }} />
+                    Run Active File
+                  </span>
+                  <div style={{ height: '1px', background: 'var(--border-color)', margin: '0.25rem 0' }}></div>
+                  <span style={{ cursor: 'pointer', padding: '0.25rem 0.5rem', borderRadius: '4px' }} className="menu-item" onClick={() => executeEditorAction('editor.action.showHover')}>Show Hover</span>
+                </div>
+              )}
+            </div>
+            <div style={{ position: 'relative' }}>
+              <span style={{ cursor: 'pointer' }} onClick={() => setActiveMenu(activeMenu === 'terminal' ? null : 'terminal')}>Terminal</span>
+              {activeMenu === 'terminal' && (
+                <div style={{ position: 'absolute', top: '100%', left: 0, marginTop: '0.5rem', background: 'var(--surface-color)', border: '1px solid var(--border-color)', borderRadius: '4px', padding: '0.5rem', display: 'flex', flexDirection: 'column', gap: '0.5rem', minWidth: '180px', zIndex: 100 }}>
+                  <span style={{ cursor: 'pointer', padding: '0.25rem 0.5rem', borderRadius: '4px' }} className="menu-item" onClick={handleNewTerminal}>New Terminal</span>
+                  <span style={{ cursor: 'pointer', padding: '0.25rem 0.5rem', borderRadius: '4px' }} className="menu-item" onClick={handleNewTerminal}>Split Terminal</span>
+                  <div style={{ height: '1px', background: 'var(--border-color)', margin: '0.25rem 0' }}></div>
+                  <span style={{ cursor: 'pointer', padding: '0.25rem 0.5rem', borderRadius: '4px' }} className="menu-item" onClick={handleCloseTerminal}>Close Terminal</span>
+                  <div style={{ height: '1px', background: 'var(--border-color)', margin: '0.25rem 0' }}></div>
+                  <span style={{ cursor: 'pointer', padding: '0.25rem 0.5rem', borderRadius: '4px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }} className="menu-item" onClick={() => { setShowTerminalPane(!showTerminalPane); setActiveMenu(null); }}>
+                    Toggle Panel <span>{showTerminalPane && '✓'}</span>
+                  </span>
+                </div>
+              )}
+            </div>
+            <div style={{ position: 'relative' }}>
+              <span style={{ cursor: 'pointer' }} onClick={() => setActiveMenu(activeMenu === 'settings' ? null : 'settings')}>Settings</span>
+              {activeMenu === 'settings' && (
+                <div style={{ position: 'absolute', top: '100%', left: 0, marginTop: '0.5rem', background: 'var(--surface-color)', border: '1px solid var(--border-color)', borderRadius: '4px', padding: '0.5rem', display: 'flex', flexDirection: 'column', gap: '0.5rem', minWidth: '180px', zIndex: 100 }}>
+                  <span style={{ cursor: 'pointer', padding: '0.25rem 0.5rem', borderRadius: '4px' }} className="menu-item" onClick={() => { setActiveMenu(null); setShowSettings(true); }}>Preferences...</span>
+                  <div style={{ height: '1px', background: 'var(--border-color)', margin: '0.25rem 0' }}></div>
+                  <span style={{ cursor: 'pointer', padding: '0.25rem 0.5rem', borderRadius: '4px' }} className="menu-item" onClick={() => { setActiveMenu(null); setToastNotification({ type: 'info', message: 'Color Theme switching coming soon!' }); setTimeout(() => setToastNotification(null), 3000); }}>Color Theme...</span>
+                  <span style={{ cursor: 'pointer', padding: '0.25rem 0.5rem', borderRadius: '4px' }} className="menu-item" onClick={() => { setActiveMenu(null); setToastNotification({ type: 'info', message: 'Keyboard Shortcuts UI coming soon!' }); setTimeout(() => setToastNotification(null), 3000); }}>Keyboard Shortcuts...</span>
+                </div>
+              )}
+            </div>
+            <div style={{ position: 'relative' }}>
+              <span style={{ cursor: 'pointer' }} onClick={() => setActiveMenu(activeMenu === 'help' ? null : 'help')}>Help</span>
+              {activeMenu === 'help' && (
+                <div style={{ position: 'absolute', top: '100%', right: 0, marginTop: '0.5rem', background: 'var(--surface-color)', border: '1px solid var(--border-color)', borderRadius: '4px', padding: '0.5rem', display: 'flex', flexDirection: 'column', gap: '0.5rem', minWidth: '180px', zIndex: 100 }}>
+                  <span style={{ cursor: 'pointer', padding: '0.25rem 0.5rem', borderRadius: '4px' }} className="menu-item" onClick={() => { setActiveMenu(null); setToastNotification({ type: 'info', message: 'Welcome to Astra IDE! Try creating a file to get started.' }); setTimeout(() => setToastNotification(null), 4000); }}>Welcome</span>
+                  <span style={{ cursor: 'pointer', padding: '0.25rem 0.5rem', borderRadius: '4px' }} className="menu-item" onClick={() => { setActiveMenu(null); setToastNotification({ type: 'info', message: 'Documentation opens in a new tab...' }); setTimeout(() => setToastNotification(null), 3000); }}>Documentation</span>
+                  <div style={{ height: '1px', background: 'var(--border-color)', margin: '0.25rem 0' }}></div>
+                  <span style={{ cursor: 'pointer', padding: '0.25rem 0.5rem', borderRadius: '4px' }} className="menu-item" onClick={() => { setActiveMenu(null); setToastNotification({ type: 'info', message: 'Astra IDE v1.0.0' }); setTimeout(() => setToastNotification(null), 3000); }}>About</span>
+                </div>
+              )}
+            </div>
           </div>
         </div>
         
@@ -1378,7 +1643,7 @@ function App() {
                   <div className="code-viewer-header" style={{ display: 'flex', padding: '0', background: '#1e1e1e', borderBottom: '1px solid var(--border-color)', overflowX: 'auto' }}>
                     {openFilesMain.map(f => (
                       <div key={f.name} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.5rem 1rem', background: activeFileIdMain === f.name ? 'var(--bg-color)' : 'transparent', borderTop: activeFileIdMain === f.name ? '2px solid #2563eb' : '2px solid transparent', cursor: 'pointer', borderRight: '1px solid var(--border-color)' }} onClick={() => setActiveFileIdMain(f.name)}>
-                        <span style={{ fontSize: '0.85rem', color: activeFileIdMain === f.name ? 'var(--text-primary)' : 'var(--text-secondary)' }}>📄 {f.name.split('/').pop()}</span>
+                        <span style={{ fontSize: '0.85rem', color: activeFileIdMain === f.name ? 'var(--text-primary)' : 'var(--text-secondary)' }}>📄 {f.name.split('/').pop()}{f.unsaved ? ' *' : ''}</span>
                         <button onClick={(e) => { e.stopPropagation(); setOpenFilesMain(prev => prev.filter(x => x.name !== f.name)); if(activeFileIdMain === f.name) setActiveFileIdMain(openFilesMain[0]?.name !== f.name ? openFilesMain[0]?.name : openFilesMain[1]?.name || null) }} style={{ background: 'transparent', border: 'none', color: '#94a3b8', cursor: 'pointer', padding: 0 }}><X size={14} /></button>
                       </div>
                     ))}
@@ -1390,7 +1655,11 @@ function App() {
                       path={activeFileIdMain || 'temp'}
                       defaultLanguage={activeFileIdMain?.split('.').pop() || 'javascript'}
                       value={openFilesMain.find(f => f.name === activeFileIdMain)?.content || ''}
-                      options={{ readOnly: true, minimap: { enabled: false }, wordWrap: 'on' }}
+                      onMount={handleEditorMainMount}
+                      onChange={(value) => {
+                        setOpenFilesMain(prev => prev.map(f => f.name === activeFileIdMain ? { ...f, content: value, unsaved: true } : f));
+                      }}
+                      options={{ readOnly: false, minimap: { enabled: minimapEnabled }, wordWrap: wordWrap ? 'on' : 'off' }}
                     />
                   </div>
                 </div>
@@ -1403,7 +1672,7 @@ function App() {
                   <div className="code-viewer-header" style={{ display: 'flex', padding: '0', background: '#1e1e1e', borderBottom: '1px solid var(--border-color)', overflowX: 'auto' }}>
                     {openFilesSplit.map(f => (
                       <div key={f.name} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.5rem 1rem', background: activeFileIdSplit === f.name ? 'var(--bg-color)' : 'transparent', borderTop: activeFileIdSplit === f.name ? '2px solid #2563eb' : '2px solid transparent', cursor: 'pointer', borderRight: '1px solid var(--border-color)' }} onClick={() => setActiveFileIdSplit(f.name)}>
-                        <span style={{ fontSize: '0.85rem', color: activeFileIdSplit === f.name ? 'var(--text-primary)' : 'var(--text-secondary)' }}>📄 {f.name.split('/').pop()}</span>
+                        <span style={{ fontSize: '0.85rem', color: activeFileIdSplit === f.name ? 'var(--text-primary)' : 'var(--text-secondary)' }}>📄 {f.name.split('/').pop()}{f.unsaved ? ' *' : ''}</span>
                         <button onClick={(e) => { e.stopPropagation(); setOpenFilesSplit(prev => prev.filter(x => x.name !== f.name)); if(activeFileIdSplit === f.name) setActiveFileIdSplit(openFilesSplit[0]?.name !== f.name ? openFilesSplit[0]?.name : openFilesSplit[1]?.name || null) }} style={{ background: 'transparent', border: 'none', color: '#94a3b8', cursor: 'pointer', padding: 0 }}><X size={14} /></button>
                       </div>
                     ))}
@@ -1415,7 +1684,11 @@ function App() {
                       path={activeFileIdSplit || 'temp'}
                       defaultLanguage={activeFileIdSplit?.split('.').pop() || 'javascript'}
                       value={openFilesSplit.find(f => f.name === activeFileIdSplit)?.content || ''}
-                      options={{ readOnly: true, minimap: { enabled: false }, wordWrap: 'on' }}
+                      onMount={handleEditorSplitMount}
+                      onChange={(value) => {
+                        setOpenFilesSplit(prev => prev.map(f => f.name === activeFileIdSplit ? { ...f, content: value, unsaved: true } : f));
+                      }}
+                      options={{ readOnly: false, minimap: { enabled: minimapEnabled }, wordWrap: wordWrap ? 'on' : 'off' }}
                     />
                   </div>
                 </div>
@@ -1436,7 +1709,7 @@ function App() {
                       <span 
                         onClick={() => setActiveTerminalTab(sh.id)}
                         style={{ cursor: 'pointer', color: activeTerminalTab === sh.id ? 'var(--text-primary)' : 'var(--text-secondary)', borderBottom: activeTerminalTab === sh.id ? '1px solid var(--text-primary)' : 'none' }}>
-                        Shell {idx + 1}
+                        Terminal {idx + 1}
                       </span>
                       <button onClick={(e) => {
                         e.stopPropagation();
@@ -1529,6 +1802,16 @@ function App() {
                   components={{
                     code({node, inline, className, children, ...props}) {
                       const match = /language-(\w+)/.exec(className || '')
+                      if (!inline && match && match[1] === 'thought') {
+                        return (
+                          <div style={{ background: '#2c2c2c', color: '#a0a0a0', padding: '0.75rem', borderRadius: '4px', borderLeft: '3px solid #666', fontStyle: 'italic', marginBottom: '1rem', fontSize: '0.85rem' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem', fontWeight: 'bold', color: '#bbb' }}>
+                              <Brain size={14} /> Thought Process
+                            </div>
+                            {String(children).replace(/\n$/, '')}
+                          </div>
+                        );
+                      }
                       return !inline && match ? (
                         <SyntaxHighlighter style={vscDarkPlus} language={match[1]} PreTag="div" {...props}>
                           {String(children).replace(/\n$/, '')}
@@ -1539,7 +1822,7 @@ function App() {
                     }
                   }}
                 >
-                  {msg.content}
+                  {msg.content ? msg.content.replace(/<think>/g, '```thought\n').replace(/<\/think>/g, '\n```\n') : ''}
                 </ReactMarkdown>
                 {msg.tool_executions && msg.tool_executions.map((t, i) => <ToolExecution key={i} tool={t} />)}
                 <div className="message-actions" style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem', justifyContent: 'flex-end' }}>
@@ -1565,6 +1848,23 @@ function App() {
                 <div className="tool-indicator">
                   <div className="tool-spinner"></div>
                   {activeTool}
+                </div>
+              )}
+
+              {/* Permission Inline Block */}
+              {pendingTool && (
+                <div style={{ background: '#2c2c2c', border: '1px solid #d35400', borderRadius: '8px', padding: '1rem', marginTop: '1rem' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: '#e67e22', marginBottom: '0.5rem', fontWeight: 'bold' }}>
+                    <AlertTriangle size={18} /> Permission Required
+                  </div>
+                  <p style={{ margin: '0 0 0.5rem 0', fontSize: '0.9rem', color: 'var(--text-primary)' }}>Astra wants to execute: <strong>{pendingTool.call.function.name}</strong></p>
+                  <pre style={{ background: '#1e1e1e', color: '#d4d4d4', padding: '0.5rem', borderRadius: '4px', overflowX: 'auto', fontSize: '0.8rem', margin: '0 0 1rem 0', border: '1px solid var(--border-color)' }}>
+                    {JSON.stringify(pendingTool.call.function.arguments, null, 2)}
+                  </pre>
+                  <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'flex-end' }}>
+                    <button onClick={() => pendingTool.resolve(false)} style={{ background: 'transparent', border: '1px solid var(--border-color)', color: 'var(--text-primary)', padding: '0.5rem 1rem', borderRadius: '4px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '0.25rem' }}><X size={14}/> Reject</button>
+                    <button onClick={() => pendingTool.resolve(true)} style={{ background: 'var(--text-primary)', border: 'none', color: 'var(--bg-color)', padding: '0.5rem 1rem', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold', display: 'flex', alignItems: 'center', gap: '0.25rem' }}><Check size={14}/> Approve</button>
+                  </div>
                 </div>
               )}
               
@@ -1878,20 +2178,7 @@ function App() {
         </div>
       )}
 
-      {/* Permission Modal */}
-      {pendingTool && (
-        <div className="modal-overlay">
-          <div className="modal-content permission-modal">
-            <h3>⚠️ Permission Required</h3>
-            <p>Astra wants to execute: <strong>{pendingTool.call.function.name}</strong></p>
-            <pre>{JSON.stringify(pendingTool.call.function.arguments, null, 2)}</pre>
-            <div className="modal-actions">
-              <button onClick={() => pendingTool.resolve(false)} className="reject-btn"><X size={16}/> Reject</button>
-              <button onClick={() => pendingTool.resolve(true)} className="approve-btn"><Check size={16}/> Approve</button>
-            </div>
-          </div>
-        </div>
-      )}
+
     </>
   );
 }

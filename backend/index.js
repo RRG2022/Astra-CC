@@ -427,9 +427,15 @@ app.post('/api/tools/terminal/run', (req, res) => {
     const taskId = crypto.randomUUID();
     let output = '';
 
-    // Use PowerShell explicitly as requested by the user
-    const child = spawn('powershell.exe', ['-Command', command], { cwd: executionDir });
+    // Use PowerShell explicitly with absolute path to avoid PATH issues
+    const powershellPath = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
+    const child = spawn(powershellPath, ['-Command', command], { cwd: executionDir });
     activeTasks[taskId] = { child, output };
+
+    child.on('error', (err) => {
+      console.error(`Failed to start process: ${err.message}`);
+      activeTasks[taskId].output += `\nError: Failed to start process: ${err.message}\n`;
+    });
 
     child.stdout.on('data', data => {
       activeTasks[taskId].output += data.toString();
@@ -473,6 +479,21 @@ app.get('/api/tools/terminal/stream/:taskId', (req, res) => {
   const task = activeTasks[req.params.taskId];
   if (!task) return res.status(404).json({ error: 'Task not found' });
   res.json({ output: task.output });
+});
+
+app.post('/api/tools/terminal/kill/:taskId', (req, res) => {
+  const task = activeTasks[req.params.taskId];
+  if (!task) return res.status(404).json({ error: 'Task not found' });
+  
+  try {
+    const { spawnSync } = require('child_process');
+    spawnSync('taskkill', ['/pid', task.child.pid, '/f', '/t']);
+  } catch(e) {
+    task.child.kill();
+  }
+  
+  task.output += '\n\n[Task killed by user]';
+  res.json({ success: true });
 });
 
 // Search in Workspace

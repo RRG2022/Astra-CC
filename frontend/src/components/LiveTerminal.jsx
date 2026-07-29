@@ -1,9 +1,20 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
+import { XOctagon } from 'lucide-react';
 
 const LiveTerminal = ({ taskId }) => {
   const terminalRef = useRef(null);
   const xtermRef = useRef(null);
   const previousLengthRef = useRef(0);
+  const [killed, setKilled] = useState(false);
+
+  const killTask = async () => {
+    try {
+      await fetch(`http://localhost:8789/api/tools/terminal/kill/${taskId}`, { method: 'POST' });
+      setKilled(true);
+    } catch(e) {
+      console.error(e);
+    }
+  };
 
   useEffect(() => {
     let term;
@@ -52,7 +63,16 @@ const LiveTerminal = ({ taskId }) => {
     return () => clearInterval(interval);
   }, [taskId]);
 
-  return <div ref={terminalRef} style={{ width: '100%', height: '300px', padding: '0.5rem', boxSizing: 'border-box', overflow: 'hidden', background: '#0d1117', borderRadius: '4px', marginTop: '0.5rem' }} />;
+  return (
+    <div style={{ position: 'relative' }}>
+      <div ref={terminalRef} style={{ width: '100%', height: '300px', padding: '0.5rem', boxSizing: 'border-box', overflow: 'hidden', background: '#0d1117', borderRadius: '4px', marginTop: '0.5rem' }} />
+      {!killed && (
+        <button onClick={killTask} style={{ position: 'absolute', top: '1rem', right: '1rem', background: '#e74c3c', color: 'white', border: 'none', borderRadius: '4px', padding: '0.25rem 0.5rem', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '0.5rem', fontSize: '0.8rem' }}>
+          <XOctagon size={14} /> Kill Task
+        </button>
+      )}
+    </div>
+  );
 };
 
 export default LiveTerminal;
