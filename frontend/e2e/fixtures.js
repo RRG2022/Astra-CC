@@ -6,12 +6,12 @@ export function ndjson(...records) {
   return records.map(record => JSON.stringify(record)).join('\n') + '\n';
 }
 
-export async function installBaseRoutes(page, { authority = 'Supervised' } = {}) {
+export async function installBaseRoutes(page, { authority = 'Supervised', workspace = WORKSPACE } = {}) {
   await page.addInitScript(({ workspace, authorityLevel }) => {
     localStorage.clear();
     localStorage.setItem('astra_workspace', workspace);
     localStorage.setItem('astra_authority_level', authorityLevel);
-  }, { workspace: WORKSPACE, authorityLevel: authority });
+  }, { workspace, authorityLevel: authority });
 
   await page.route('http://localhost:8789/api/output/stream', route => route.fulfill({
     status: 200,

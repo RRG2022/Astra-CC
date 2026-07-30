@@ -174,12 +174,14 @@ export class AgentRuntime {
   async run(initialContext, agentMsgIndex) {
     this.agentMsgIndex = agentMsgIndex;
     this.context = [...initialContext];
-    this.updateState({ iterationCount: 0, stopReason: null });
+    this.updateState({ stopReason: null, iterationCount: 0 });
+    
+    // Clear sessionReadFiles per new tool loop run
+    if (!this.sessionReadFiles) this.sessionReadFiles = new Map();
+    this.sessionReadFiles.clear();
 
-    let iterations = 0;
-    while (iterations < this.options.maxIterations) {
-      iterations++;
-      this.updateState({ iterationCount: iterations });
+    while (this.state.iterationCount < this.options.maxIterations) {
+      this.updateState({ iterationCount: this.state.iterationCount + 1 });
 
       if (this.state.stopReason === 'cancelled') break;
 
@@ -229,8 +231,16 @@ export class AgentRuntime {
         const workspaceDependentTools = ['run_command', 'read_file', 'write_file', 'edit_file', 'create_file', 'delete_file', 'list_dir', 'grep_search'];
 
         let resultString = '';
-        if (workspaceDependentTools.includes((call.function ? call.function.name : call.name)) && !this.options.workspacePath) {
+        const toolName = (call.function ? call.function.name : call.name);
+        const args = (call.function ? JSON.parse(call.function.arguments || '{}') : (typeof call.arguments === 'string' ? JSON.parse(call.arguments || '{}') : call.arguments));
+        
+        // Simple frontend path normalization (remove leading ./)
+        const normalizedPath = args.filePath ? args.filePath.replace(/\\/g, '/').replace(/^\.\//, '') : '';
+        
+        if (workspaceDependentTools.includes(toolName) && !this.options.workspacePath) {
           resultString = 'Error: Active workspace is required for this action.';
+        } else if (toolName === 'edit_file' && (!normalizedPath || !this.sessionReadFiles.has(normalizedPath))) {
+          resultString = 'Error: You must read the file (or the relevant portion of it) using read_file before attempting to edit it. This is a strict safety invariant.';
         } else if (needsApproval) {
           this.updateState({ pendingApproval: call });
           const approved = await this.options.requestApproval(call);
@@ -245,6 +255,16 @@ export class AgentRuntime {
           }
         } else {
           resultString = await this.options.executeTool(call);
+        }
+
+        // Track successfully read files
+        if (toolName === 'read_file' && resultString) {
+          try {
+            const parsed = JSON.parse(resultString);
+            if (parsed.success && parsed.contentHash && normalizedPath) {
+              this.sessionReadFiles.set(normalizedPath, parsed.contentHash);
+            }
+          } catch(e) {}
         }
 
         this.options.onMessageUpdate(agentMsgIndex, {
@@ -273,7 +293,7 @@ export class AgentRuntime {
       this.context = anchorToolsForNextTurn(this.context);
     }
 
-    if (iterations >= this.options.maxIterations) {
+    if (this.state.iterationCount >= this.options.maxIterations) {
       this.updateState({ stopReason: 'max_iterations' });
     }
   }

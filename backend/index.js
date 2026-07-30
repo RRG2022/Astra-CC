@@ -11,7 +11,8 @@ const pty = require('node-pty');
 const os = require('os');
 const { resolveSafePath } = require('./security/safe-path');
 const { validatePluginName } = require('./plugins/plugin-policy');
-
+const shadowGit = require('./shadowGit');
+const crypto = require('crypto');
 const app = express();
 
 // Middleware (Must be before routes)
@@ -340,23 +341,7 @@ app.post('/api/chat', async (req, res) => {
 });
 
 // Agent Tool: File System (Read)
-app.post('/api/tools/fs/read', (req, res) => {
-  const { filePath, workspacePath } = req.body;
-  if (!filePath) {
-    return res.status(400).json({ error: 'filePath is required' });
-  }
-  
-  try {
-    const absolutePath = workspacePath ? resolveSafePath(workspacePath, filePath) : path.resolve(filePath);
-    if (!fs.existsSync(absolutePath)) {
-      return res.status(404).json({ error: `File not found: ${absolutePath}` });
-    }
-    const content = fs.readFileSync(absolutePath, 'utf8');
-    res.json({ success: true, content });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
+app.post('/api/tools/fs/read', require('./src/handlers/fs').handleFsRead);
 
 // Agent Tool: File System (List Directory)
 app.post('/api/tools/fs/list', (req, res) => {
@@ -462,7 +447,7 @@ app.post('/api/tools/fs/grep', (req, res) => {
   }
 });
 
-const crypto = require('crypto');
+
 const activeTasks = {};
 
 app.post('/api/tools/terminal/run', (req, res) => {
@@ -656,28 +641,11 @@ app.get('/api/fs/browse-native', (req, res) => {
 });
 
 // Agent Tool: File System (Write)
-app.post('/api/tools/fs/write', (req, res) => {
-  const { filePath, content, workspacePath } = req.body;
-  
-  if (!filePath || content === undefined) {
-    return res.status(400).json({ error: 'filePath and content are required' });
-  }
-  
-  try {
-    const absolutePath = workspacePath ? resolveSafePath(workspacePath, filePath) : path.resolve(filePath);
-    
-    // Create directories if they don't exist
-    const dir = path.dirname(absolutePath);
-    if (!fs.existsSync(dir)) {
-      fs.mkdirSync(dir, { recursive: true });
-    }
-    
-    fs.writeFileSync(absolutePath, content, 'utf8');
-    res.json({ success: true, message: `File written to ${absolutePath}` });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
+app.post('/api/tools/fs/write', require('./src/handlers/fs').handleFsWrite);
+
+app.post('/api/tools/fs/edit', require('./src/handlers/fs').handleFsEdit);
+
+app.post('/api/tools/fs/rewind', require('./src/handlers/fs').handleFsRewind);
 
 // (Removed duplicate terminal/run)
 

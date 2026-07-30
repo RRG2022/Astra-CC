@@ -43,9 +43,28 @@ const TOOLS = [
       parameters: {
         type: 'object',
         properties: {
-          filePath: { type: 'string', description: 'Relative path to the file from the workspace root' }
+          filePath: { type: 'string', description: 'Relative path to the file from the workspace root' },
+          offset: { type: 'number', description: 'Optional starting line number (0-indexed) for slicing large files' },
+          limit: { type: 'number', description: 'Optional maximum number of lines to read' }
         },
         required: ['filePath']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'edit_file',
+      description: 'Edit an existing file by exactly replacing oldString with newString. Requires a contentHash from read_file.',
+      parameters: {
+        type: 'object',
+        properties: {
+          filePath: { type: 'string', description: 'Relative path to the file' },
+          oldString: { type: 'string', description: 'The exact string to be replaced. Must appear exactly once in the file.' },
+          newString: { type: 'string', description: 'The new string to insert in its place' },
+          contentHash: { type: 'string', description: 'The contentHash of the file, acquired by first calling read_file' }
+        },
+        required: ['filePath', 'oldString', 'newString', 'contentHash']
       }
     }
   },
@@ -110,24 +129,41 @@ const TOOLS = [
     }
   }
 ];
-const ToolExecution = ({ tool }) => {
+const ToolExecution = ({ tool, onRewind }) => {
   const [expanded, setExpanded] = useState(false);
 
   let taskId = null;
-  if (tool.result && typeof tool.result === 'string' && tool.result.includes('taskId')) {
-    try {
-      const parsed = JSON.parse(tool.result);
-      if (parsed.taskId) taskId = parsed.taskId;
-    } catch(e) {}
+  let checkpointSha = null;
+  if (tool.result && typeof tool.result === 'string') {
+    if (tool.result.includes('taskId')) {
+      try {
+        const parsed = JSON.parse(tool.result);
+        if (parsed.taskId) taskId = parsed.taskId;
+      } catch(e) {}
+    }
+    if (tool.result.includes('checkpointSha')) {
+      try {
+        const parsed = JSON.parse(tool.result);
+        if (parsed.checkpointSha) checkpointSha = parsed.checkpointSha;
+      } catch(e) {}
+    }
   }
 
   return (
     <div className="tool-execution-log" style={{ opacity: tool.status === 'running' ? 0.7 : 1 }}>
       <div className="tool-execution-header" onClick={() => setExpanded(!expanded)} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', padding: '0.5rem', background: '#252526', border: '1px solid var(--border-color)', borderRadius: expanded || tool.status === 'running' ? '4px 4px 0 0' : '4px' }}>
         {tool.status === 'running' ? <div className="tool-spinner" style={{ width: '12px', height: '12px', border: '2px solid #ccc', borderTopColor: 'transparent', borderRadius: '50%', animation: 'spin 1s linear infinite' }} /> : (expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />)}
-        <span style={{ fontSize: '0.85rem' }}>
+        <span style={{ fontSize: '0.85rem', flex: 1 }}>
           {tool.status === 'running' ? 'Running' : 'Executed'} <strong style={{ color: '#4fc1ff' }}>{tool.name}</strong>
         </span>
+        {checkpointSha && onRewind && (
+          <button 
+            onClick={(e) => { e.stopPropagation(); onRewind(tool.arguments.filePath, checkpointSha); }}
+            style={{ display: 'flex', alignItems: 'center', gap: '4px', background: '#3c3c3c', border: '1px solid #555', color: '#ccc', borderRadius: '4px', padding: '2px 6px', fontSize: '0.75rem', cursor: 'pointer' }}
+          >
+            <RefreshCw size={12} /> Rewind
+          </button>
+        )}
       </div>
       {(expanded || tool.status === 'running') && (
         <div className="tool-execution-body" style={{ padding: '0.5rem', background: '#1e1e1e', border: '1px solid var(--border-color)', borderTop: 'none', borderRadius: '0 0 4px 4px', fontSize: '0.8rem', color: '#ccc', overflowX: 'auto' }}>
@@ -837,6 +873,32 @@ function App() {
         }
         return JSON.stringify(data);
       }
+      else if (name === 'edit_file') {
+        const res = await fetch('http://localhost:8789/api/tools/fs/edit', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ...argsObj, workspacePath })
+        });
+        const data = await res.json();
+        if (data.success) {
+          // Trigger a read to get the new full content for the UI editor
+          const readRes = await fetch('http://localhost:8789/api/tools/fs/read', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ filePath: argsObj.filePath, workspacePath })
+          });
+          const readData = await readRes.json();
+          if (readData.success) {
+            setOpenFilesMain(prev => {
+              const exists = prev.find(f => f.name === argsObj.filePath);
+              if (!exists) return [...prev, { name: argsObj.filePath, content: readData.content }];
+              return prev.map(f => f.name === argsObj.filePath ? { ...f, content: readData.content } : f);
+            });
+            setActiveFileIdMain(argsObj.filePath);
+          }
+        }
+        return JSON.stringify(data);
+      }
       else if (name === 'run_command') {
         const res = await fetch('http://localhost:8789/api/tools/terminal/run', {
           method: 'POST',
@@ -918,6 +980,33 @@ function App() {
   });
 
   const isGenerating = runtime.isStreaming || runtime.isExecutingTool;
+
+  const handleRewind = useCallback(async (filePath, checkpointSha) => {
+    // Treat rewind as a file mutation that requires approval
+    const call = {
+      name: 'rewind_file',
+      arguments: { filePath, checkpointSha }
+    };
+    
+    const approved = await requestApproval(call);
+    if (!approved) return;
+    
+    try {
+      const res = await fetch('http://localhost:8789/api/tools/fs/rewind', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filePath, checkpointSha, workspacePath })
+      });
+      const data = await res.json();
+      if (data.success) {
+        onTraceLog(`Rewound ${filePath} to ${checkpointSha} (Recovery SHA: ${data.recoverySha})`);
+      } else {
+        onTraceLog(`Failed to rewind ${filePath}: ${data.error}`);
+      }
+    } catch (e) {
+      onTraceLog(`Error during rewind: ${e.message}`);
+    }
+  }, [workspacePath, requestApproval, onTraceLog]);
 
   const handleSend = async (overrideInput = null, overrideMessages = null) => {
     const textToSubmit = overrideInput !== null ? overrideInput : input;
@@ -1756,7 +1845,7 @@ function App() {
                 >
                   {msg.content ? msg.content.replace(/<think>/g, '```thought\n').replace(/<\/think>/g, '\n```\n') : ''}
                 </ReactMarkdown>
-                {msg.tool_executions && msg.tool_executions.map((t, i) => <ToolExecution key={i} tool={t} />)}
+                {msg.tool_executions && msg.tool_executions.map((t, i) => <ToolExecution key={i} tool={t} onRewind={handleRewind} />)}
                 <div className="message-actions" style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem', justifyContent: 'flex-end' }}>
 
                     {msg.role === 'user' ? (
@@ -1790,9 +1879,35 @@ function App() {
                     <AlertTriangle size={18} /> Permission Required
                   </div>
                   <p style={{ margin: '0 0 0.5rem 0', fontSize: '0.9rem', color: 'var(--text-primary)' }}>Astra wants to execute: <strong>{(pendingTool.call.function ? pendingTool.call.function.name : pendingTool.call.name)}</strong></p>
-                  <pre style={{ background: '#1e1e1e', color: '#d4d4d4', padding: '0.5rem', borderRadius: '4px', overflowX: 'auto', fontSize: '0.8rem', margin: '0 0 1rem 0', border: '1px solid var(--border-color)' }}>
-                    {JSON.stringify((pendingTool.call.function ? pendingTool.call.function.arguments : pendingTool.call.arguments), null, 2)}
-                  </pre>
+                  {(() => {
+                    const funcName = pendingTool.call.function ? pendingTool.call.function.name : pendingTool.call.name;
+                    const args = pendingTool.call.function ? pendingTool.call.function.arguments : pendingTool.call.arguments;
+                    
+                    if (funcName === 'edit_file') {
+                      let parsedArgs = args;
+                      if (typeof args === 'string') {
+                        try { parsedArgs = JSON.parse(args); } catch(e) {}
+                      }
+                      
+                      return (
+                        <div style={{ margin: '0 0 1rem 0', border: '1px solid var(--border-color)', borderRadius: '4px', overflow: 'hidden' }}>
+                          <div style={{ background: '#333', color: '#ccc', padding: '0.25rem 0.5rem', fontSize: '0.75rem', borderBottom: '1px solid var(--border-color)' }}>{parsedArgs.filePath}</div>
+                          <pre style={{ background: '#3a1d1d', color: '#f8c2c2', padding: '0.5rem', margin: 0, overflowX: 'auto', fontSize: '0.8rem', borderBottom: '1px solid var(--border-color)' }}>
+                            <span style={{opacity: 0.5}}>- </span>{parsedArgs.oldString}
+                          </pre>
+                          <pre style={{ background: '#1d3a23', color: '#c2f8cb', padding: '0.5rem', margin: 0, overflowX: 'auto', fontSize: '0.8rem' }}>
+                            <span style={{opacity: 0.5}}>+ </span>{parsedArgs.newString}
+                          </pre>
+                        </div>
+                      );
+                    }
+                    
+                    return (
+                      <pre style={{ background: '#1e1e1e', color: '#d4d4d4', padding: '0.5rem', borderRadius: '4px', overflowX: 'auto', fontSize: '0.8rem', margin: '0 0 1rem 0', border: '1px solid var(--border-color)' }}>
+                        {JSON.stringify(args, null, 2)}
+                      </pre>
+                    );
+                  })()}
                   <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'flex-end' }}>
                     <button onClick={() => pendingTool.resolve(false)} style={{ background: 'transparent', border: '1px solid var(--border-color)', color: 'var(--text-primary)', padding: '0.5rem 1rem', borderRadius: '4px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '0.25rem' }}><X size={14}/> Reject</button>
                     <button onClick={() => pendingTool.resolve(true)} style={{ background: 'var(--text-primary)', border: 'none', color: 'var(--bg-color)', padding: '0.5rem 1rem', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold', display: 'flex', alignItems: 'center', gap: '0.25rem' }}><Check size={14}/> Approve</button>
