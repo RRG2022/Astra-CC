@@ -1,3 +1,4 @@
+import { useAgentRuntime } from './lib/useAgentRuntime.js';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
@@ -111,7 +112,7 @@ const TOOLS = [
 ];
 const ToolExecution = ({ tool }) => {
   const [expanded, setExpanded] = useState(false);
-  
+
   let taskId = null;
   if (tool.result && typeof tool.result === 'string' && tool.result.includes('taskId')) {
     try {
@@ -167,7 +168,7 @@ function App() {
     }
   });
   const [input, setInput] = useState(() => localStorage.getItem('astra_current_input') || '');
-  const [isGenerating, setIsGenerating] = useState(false);
+
   const [activeTool, setActiveTool] = useState(null);
   const [openFilesMain, setOpenFilesMain] = useState([]);
   const [activeFileIdMain, setActiveFileIdMain] = useState(null);
@@ -183,7 +184,7 @@ function App() {
   const [problems, setProblems] = useState(null);
   const [isLinting, setIsLinting] = useState(false);
 
-  const [abortController, setAbortController] = useState(null);
+
   const [authorityLevel, setAuthorityLevel] = useState(() => localStorage.getItem('astra_authority_level') || 'Supervised');
   const [pendingTool, setPendingTool] = useState(null);
   const [tools, setTools] = useState(() => {
@@ -342,11 +343,11 @@ function App() {
 
   const editorRefMain = useRef(null);
   const editorRefSplit = useRef(null);
-  
+
   const handleEditorMainMount = (editor) => {
     editorRefMain.current = editor;
   };
-  
+
   const handleEditorSplitMount = (editor) => {
     editorRefSplit.current = editor;
   };
@@ -375,7 +376,7 @@ function App() {
   useEffect(() => {
     if (pendingTool) {
       const toolName = pendingTool.call?.function?.name || 'tool';
-      
+
       // Custom In-App Toast Notification
       setToastNotification({
         title: 'Permission Required',
@@ -459,12 +460,12 @@ function App() {
 
   const regenerateLast = () => {
     if (messages.length === 0 || isGenerating) return;
-    
+
     let lastUserIdx = messages.length - 1;
     while (lastUserIdx >= 0 && messages[lastUserIdx].role !== 'user') {
       lastUserIdx--;
     }
-    
+
     if (lastUserIdx >= 0) {
       const userMessage = messages[lastUserIdx].content;
       // Strip attachments out if they were baked in
@@ -562,7 +563,7 @@ function App() {
   const [fsEnabled, setFsEnabled] = useState(() => {
     return localStorage.getItem('astra_fs_enabled') !== 'false';
   });
-  
+
   const handleToggleFs = () => {
     setFsEnabled(prev => {
       const next = !prev;
@@ -607,7 +608,7 @@ function App() {
     return saved ? JSON.parse(saved) : [];
   });
   const [orchHistoryIndex, setOrchHistoryIndex] = useState(-1);
-  
+
   useEffect(() => {
     localStorage.setItem('astra_orch_history', JSON.stringify(orchHistory));
   }, [orchHistory]);
@@ -615,7 +616,7 @@ function App() {
   const handleSearch = async () => {
     if (!searchQuery.trim()) return;
     setIsSearching(true);
-    
+
     setSearchHistory(prev => {
       const filtered = prev.filter(q => q !== searchQuery.trim());
       return [searchQuery.trim(), ...filtered].slice(0, 50);
@@ -641,10 +642,10 @@ function App() {
 
   const handleRunActiveFile = async () => {
     if (!activeFileIdMain) return;
-    
+
     // Auto-save if unsaved
     await handleSaveFile(activeFileIdMain);
-    
+
     let command = '';
     if (activeFileIdMain.endsWith('.js') || activeFileIdMain.endsWith('.jsx')) {
       command = `node "${activeFileIdMain}"`;
@@ -793,18 +794,14 @@ function App() {
   };
 
   const stopGeneration = () => {
-    if (abortController) {
-      abortController.abort();
-      setAbortController(null);
-      setIsGenerating(false);
-      setActiveTool(null);
-    }
+    runtime.cancel();
+    setActiveTool(null);
   };
 
   const executeTool = async (toolCall) => {
-    const { name, arguments: argsObj } = toolCall.function;
+    const name = toolCall.function ? toolCall.function.name : toolCall.name; const argsObj = toolCall.function ? toolCall.function.arguments : toolCall.arguments;
     setActiveTool(`Running ${name}...`);
-    
+
     try {
       if (name === 'read_file') {
         const res = await fetch('http://localhost:8789/api/tools/fs/read', {
@@ -814,15 +811,15 @@ function App() {
         });
         const data = await res.json();
         if (data.success) {
-          setOpenFilesMain(prev => { 
-            const exists = prev.find(f => f.name === argsObj.filePath); 
-            if (!exists) return [...prev, { name: argsObj.filePath, content: data.content }]; 
-            return prev.map(f => f.name === argsObj.filePath ? { ...f, content: data.content } : f); 
+          setOpenFilesMain(prev => {
+            const exists = prev.find(f => f.name === argsObj.filePath);
+            if (!exists) return [...prev, { name: argsObj.filePath, content: data.content }];
+            return prev.map(f => f.name === argsObj.filePath ? { ...f, content: data.content } : f);
           });
           setActiveFileIdMain(argsObj.filePath);
         }
         return JSON.stringify(data);
-      } 
+      }
       else if (name === 'write_file') {
         const res = await fetch('http://localhost:8789/api/tools/fs/write', {
           method: 'POST',
@@ -831,10 +828,10 @@ function App() {
         });
         const data = await res.json();
         if (data.success) {
-          setOpenFilesMain(prev => { 
-            const exists = prev.find(f => f.name === argsObj.filePath); 
-            if (!exists) return [...prev, { name: argsObj.filePath, content: argsObj.content }]; 
-            return prev.map(f => f.name === argsObj.filePath ? { ...f, content: argsObj.content } : f); 
+          setOpenFilesMain(prev => {
+            const exists = prev.find(f => f.name === argsObj.filePath);
+            if (!exists) return [...prev, { name: argsObj.filePath, content: argsObj.content }];
+            return prev.map(f => f.name === argsObj.filePath ? { ...f, content: argsObj.content } : f);
           });
           setActiveFileIdMain(argsObj.filePath);
         }
@@ -880,84 +877,47 @@ function App() {
     }
   };
 
-  const streamOllama = async (apiMessages, agentMsgIndex, signal) => {
-    const payload = {
-      model: selectedModel,
-      messages: apiMessages,
-      ...(selectedModel.toLowerCase().includes('llama') || selectedModel.toLowerCase().includes('gpt') ? { tools: TOOLS } : {}),
-      stream: true
-    };
-    
-    const traceEntry = {
-      timestamp: Date.now(),
-      model: selectedModel,
-      requestPayload: payload,
-      rawBuffer: '',
-      parsedToolCalls: []
-    };
 
-    const response = await fetch('http://localhost:8789/api/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
-      signal
+  const onMessageUpdate = useCallback((agentMsgIndex, update) => {
+    setMessages(prev => {
+      const newMessages = [...prev];
+      const msg = { ...newMessages[agentMsgIndex] };
+      if (update.content !== undefined) msg.content += update.content;
+      if (update.content_replace !== undefined) msg.content = update.content_replace;
+      if (update.tool_execution) {
+        msg.tool_executions = [...(msg.tool_executions || []), update.tool_execution];
+      }
+      if (update.tool_execution_result) {
+        msg.tool_executions = (msg.tool_executions || []).map(t =>
+          t.id === update.tool_execution_result.id ? { ...t, ...update.tool_execution_result } : t
+        );
+      }
+      newMessages[agentMsgIndex] = msg;
+      return newMessages;
     });
+  }, []);
 
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder('utf-8');
-    let toolCalls = [];
-    let fullContent = '';
+  const onTraceLog = useCallback((entry) => {
+    setTraceLogs(prev => [entry, ...prev].slice(0, 100));
+  }, []);
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+  const requestApproval = useCallback((call) => {
+    return new Promise((resolve) => setPendingTool({ call, resolve }));
+  }, []);
 
-      const chunk = decoder.decode(value, { stream: true });
-      traceEntry.rawBuffer += chunk;
-      const lines = chunk.split('\n').filter(line => line.trim() !== '');
+  const runtime = useAgentRuntime({
+    onMessageUpdate,
+    onTraceLog,
+    executeTool,
+    requestApproval,
+    model: selectedModel,
+    tools: selectedModel.toLowerCase().includes('llama') || selectedModel.toLowerCase().includes('gpt') ? TOOLS : [],
+    workspacePath,
+    authorityLevel,
+    maxIterations: 10
+  });
 
-      for (const line of lines) {
-        try {
-          const parsed = JSON.parse(line);
-          
-          if (parsed.message?.content) {
-            fullContent += parsed.message.content;
-            setMessages(prev => {
-              const newMessages = [...prev];
-              const msg = { ...newMessages[agentMsgIndex] };
-              msg.content += parsed.message.content;
-              newMessages[agentMsgIndex] = msg;
-              return newMessages;
-            });
-          }
-          
-          if (parsed.message?.tool_calls) {
-            toolCalls = parsed.message.tool_calls;
-          }
-        } catch (e) {
-          // Ignore incomplete JSON chunks
-        }
-      }
-    }
-    
-    // Fallback tool parser for models that output JSON in the text
-    if (toolCalls.length === 0 && fullContent.includes('"name"') && fullContent.includes('"arguments"')) {
-      const toolCallRegex = /\{[\s]*"name"[\s]*:[\s]*"[^"]+"[\s]*,[\s]*"arguments"[\s]*:[\s]*\{[\s\S]*?\}[\s]*\}/g;
-      let match;
-      while ((match = toolCallRegex.exec(fullContent)) !== null) {
-        try {
-          const parsedTool = JSON.parse(match[0]);
-          if (parsedTool.name && parsedTool.arguments) {
-            toolCalls.push({ function: parsedTool });
-          }
-        } catch(e) {}
-      }
-    }
-
-    traceEntry.parsedToolCalls = toolCalls;
-    setTraceLogs(prev => [traceEntry, ...prev].slice(0, 100));
-    return toolCalls;
-  };
+  const isGenerating = runtime.isStreaming || runtime.isExecutingTool;
 
   const handleSend = async (overrideInput = null, overrideMessages = null) => {
     const textToSubmit = overrideInput !== null ? overrideInput : input;
@@ -986,19 +946,18 @@ function App() {
     const currentMessages = overrideMessages !== null ? overrideMessages : messages;
     const userMessage = { id: crypto.randomUUID(), role: 'user', content: userText };
     setMessages([...currentMessages, userMessage]);
-    
-    setIsGenerating(true);
+
+
 
     const agentMsgIndex = currentMessages.length + 1;
     setMessages(prev => [...prev, { id: crypto.randomUUID(), role: 'assistant', content: '', tool_executions: [] }]);
 
-    const controller = new AbortController();
-    setAbortController(controller);
+
 
     try {
       let systemPrompt = PERSONAS[selectedPersona].prompt;
       if (workspacePath) {
-        systemPrompt += `\nYour active workspace is located at: ${workspacePath}`;
+        systemPrompt += '\nYour active workspace is located at: ' + workspacePath;
       }
 
       let currentContext = [
@@ -1007,78 +966,7 @@ function App() {
         userMessage
       ];
 
-      // Step 1: Initial request to model
-      let toolCalls = await streamOllama(currentContext, agentMsgIndex, controller.signal);
-
-      // Step 2: Handle tool calls in a loop if necessary
-      while (toolCalls && toolCalls.length > 0) {
-        // Append the assistant's tool call intent to context
-        currentContext.push({
-          role: 'assistant',
-          content: '',
-          tool_calls: toolCalls
-        });
-
-        // Execute all tools
-        for (const call of toolCalls) {
-          const callId = crypto.randomUUID();
-          
-          // Append pending state to visual indicator IMMEDIATELY
-          setMessages(prev => {
-             const newMessages = [...prev];
-             const msg = { ...newMessages[agentMsgIndex] };
-             msg.tool_executions = [...(msg.tool_executions || []), {
-               id: callId,
-               name: call.function.name,
-               arguments: call.function.arguments,
-               status: 'running',
-               result: null
-             }];
-             newMessages[agentMsgIndex] = msg;
-             return newMessages;
-          });
-
-          const currentAuthority = localStorage.getItem('astra_authority_level') || 'Supervised';
-          const needsApproval = currentAuthority === 'Strict' || (currentAuthority === 'Supervised' && ['write_file', 'run_command'].includes(call.function.name));
-          
-          let resultString = '';
-          if (needsApproval) {
-            const approved = await new Promise((resolve) => {
-              setPendingTool({ call, resolve });
-            });
-            setPendingTool(null);
-            
-            if (!approved) {
-              resultString = 'Error: User explicitly denied permission to execute this tool. You must explain why you wanted to run this or ask for clarification.';
-            } else {
-              resultString = await executeTool(call);
-            }
-          } else {
-            resultString = await executeTool(call);
-          }
-          
-          currentContext.push({
-            role: 'tool',
-            content: resultString,
-            name: call.function.name
-          });
-          
-          // Update visual indicator to completed
-          setMessages(prev => {
-             const newMessages = [...prev];
-             const msg = { ...newMessages[agentMsgIndex] };
-             msg.tool_executions = msg.tool_executions.map(t => 
-               t.id === callId ? { ...t, status: 'completed', result: resultString } : t
-             );
-             newMessages[agentMsgIndex] = msg;
-             return newMessages;
-          });
-        }
-
-        // Send results back to model for the next step/final answer
-        toolCalls = await streamOllama(currentContext, agentMsgIndex, controller.signal);
-      }
-
+      await runtime.run(currentContext, agentMsgIndex);
     } catch (err) {
       if (err.name === 'AbortError') {
         console.log('Generation stopped by user');
@@ -1093,8 +981,8 @@ function App() {
         return newMessages;
       });
     } finally {
-      setIsGenerating(false);
-      setAbortController(null);
+
+
     }
   };
 
@@ -1185,36 +1073,36 @@ function App() {
               <h3 style={{ margin: 0, fontSize: '1rem', color: 'var(--text-primary)' }}>Select Repository</h3>
               <button onClick={() => setShowBrowser(false)} style={{ background: 'transparent', border: 'none', color: 'var(--text-secondary)', cursor: 'pointer' }}><XOctagon size={16} /></button>
             </div>
-            
+
             <div style={{ display: 'flex', gap: '0.5rem' }}>
               <button onClick={() => { setRepoSelectorPath('C:\\'); fetchRepoDir('C:\\'); }} style={{ background: 'var(--surface-color)', border: '1px solid var(--border-color)', padding: '0.25rem 0.5rem', color: 'var(--text-primary)', borderRadius: '4px', cursor: 'pointer', fontSize: '0.8rem' }}>C:\</button>
               <button onClick={() => { setRepoSelectorPath('D:\\'); fetchRepoDir('D:\\'); }} style={{ background: 'var(--surface-color)', border: '1px solid var(--border-color)', padding: '0.25rem 0.5rem', color: 'var(--text-primary)', borderRadius: '4px', cursor: 'pointer', fontSize: '0.8rem' }}>D:\</button>
               <button onClick={() => { setRepoSelectorPath('E:\\'); fetchRepoDir('E:\\'); }} style={{ background: 'var(--surface-color)', border: '1px solid var(--border-color)', padding: '0.25rem 0.5rem', color: 'var(--text-primary)', borderRadius: '4px', cursor: 'pointer', fontSize: '0.8rem' }}>E:\</button>
             </div>
-            
+
             <div style={{ display: 'flex', gap: '0.5rem' }}>
-              <input 
-                type="text" 
-                value={repoSelectorPath} 
+              <input
+                type="text"
+                value={repoSelectorPath}
                 onChange={(e) => setRepoSelectorPath(e.target.value)}
                 onKeyDown={(e) => { if (e.key === 'Enter') fetchRepoDir(repoSelectorPath); }}
                 style={{ flex: 1, background: 'var(--surface-color)', border: '1px solid var(--border-color)', padding: '0.5rem', color: 'var(--text-primary)', borderRadius: '4px' }}
                 placeholder="Type path (e.g. D:\Projects) and press Enter"
               />
-              <button 
-                onClick={() => fetchRepoDir(repoSelectorPath)} 
+              <button
+                onClick={() => fetchRepoDir(repoSelectorPath)}
                 style={{ background: 'var(--surface-color)', border: '1px solid var(--border-color)', padding: '0.5rem 1rem', color: 'var(--text-primary)', cursor: 'pointer', borderRadius: '4px', fontWeight: 'bold' }}
               >
                 Go
               </button>
-              <button 
+              <button
                 onClick={() => {
                   const parts = repoSelectorPath.replace(/\\/g, '/').split('/').filter(Boolean);
                   parts.pop();
                   const newPath = parts.length > 0 ? parts.join('/') + '/' : 'C:/';
                   setRepoSelectorPath(newPath);
                   fetchRepoDir(newPath);
-                }} 
+                }}
                 title="Go Up One Folder"
                 style={{ background: 'var(--surface-color)', border: '1px solid var(--border-color)', padding: '0.5rem', color: 'var(--text-primary)', cursor: 'pointer', borderRadius: '4px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
               >
@@ -1223,15 +1111,15 @@ function App() {
             </div>
 
             <div style={{ height: '300px', overflowY: 'auto', background: 'var(--surface-color)', border: '1px solid var(--border-color)', borderRadius: '4px', padding: '0.5rem' }}>
-              <div 
-                className="fs-node" 
+              <div
+                className="fs-node"
                 onClick={() => {
                   const parts = repoSelectorPath.replace(/\\/g, '/').split('/').filter(Boolean);
                   parts.pop();
                   const newPath = parts.length > 0 ? parts.join('/') + '/' : 'C:/';
                   setRepoSelectorPath(newPath);
                   fetchRepoDir(newPath);
-                }} 
+                }}
                 style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.25rem', cursor: 'pointer', fontSize: '0.9rem', color: 'var(--text-primary)' }}
               >
                 <Folder size={16} /> ..
@@ -1275,10 +1163,10 @@ function App() {
                   <span style={{ cursor: 'pointer', padding: '0.25rem 0.5rem', borderRadius: '4px' }} className="menu-item" onClick={() => { setActiveMenu(null); setShowBrowser(true); }}>Open Folder</span>
                   <div style={{ height: '1px', background: 'var(--border-color)', margin: '0.25rem 0' }}></div>
                   <span style={{ cursor: 'pointer', padding: '0.25rem 0.5rem', borderRadius: '4px', color: activeFileIdMain ? 'var(--text-primary)' : 'var(--text-secondary)' }} className="menu-item" onClick={() => { setActiveMenu(null); if (activeFileIdMain) handleSaveFile(activeFileIdMain); }}>Save</span>
-                  <span style={{ cursor: 'pointer', padding: '0.25rem 0.5rem', borderRadius: '4px', color: activeFileIdMain ? 'var(--text-primary)' : 'var(--text-secondary)' }} className="menu-item" onClick={() => { 
-                    setActiveMenu(null); 
+                  <span style={{ cursor: 'pointer', padding: '0.25rem 0.5rem', borderRadius: '4px', color: activeFileIdMain ? 'var(--text-primary)' : 'var(--text-secondary)' }} className="menu-item" onClick={() => {
+                    setActiveMenu(null);
                     if (activeFileIdMain) {
-                      setOpenFilesMain(prev => prev.filter(x => x.name !== activeFileIdMain)); 
+                      setOpenFilesMain(prev => prev.filter(x => x.name !== activeFileIdMain));
                       setActiveFileIdMain(openFilesMain[0]?.name !== activeFileIdMain ? openFilesMain[0]?.name : openFilesMain[1]?.name || null);
                     }
                   }}>Close File</span>
@@ -1398,25 +1286,25 @@ function App() {
             </div>
           </div>
         </div>
-        
+
         <div style={{ width: '5px' }}></div>
-        
-        <div style={{ 
-          width: sidebarWidth, 
-          padding: '0.5rem 1rem', 
-          display: 'flex', 
-          alignItems: 'center', 
+
+        <div style={{
+          width: sidebarWidth,
+          padding: '0.5rem 1rem',
+          display: 'flex',
+          alignItems: 'center',
           borderLeft: '1px solid var(--border-color)',
         }}>
           <div className="header-controls" style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', width: '100%', justifyContent: 'flex-start' }}>
             <div className="selector-group" title="Workspace" style={{ flex: '1 1 auto', minWidth: '120px' }}>
               <div style={{ display: 'flex', gap: '0.5rem', width: '100%' }}>
-                <input 
-                  type="text" 
-                  id="workspace" 
-                  className="workspace-input" 
-                  value={workspacePath} 
-                  onChange={(e) => setWorkspacePath(e.target.value)} 
+                <input
+                  type="text"
+                  id="workspace"
+                  className="workspace-input"
+                  value={workspacePath}
+                  onChange={(e) => setWorkspacePath(e.target.value)}
                   placeholder="Workspace path..."
                   style={{ background: '#1e1e1e', border: 'none', height: 32, flex: 1, minWidth: 0 }}
                 />
@@ -1424,9 +1312,9 @@ function App() {
               </div>
             </div>
             <div className="selector-group" title="Persona" style={{ flex: '1 1 auto', minWidth: '100px' }}>
-              <select 
-                id="persona" 
-                value={selectedPersona} 
+              <select
+                id="persona"
+                value={selectedPersona}
                 onChange={(e) => setSelectedPersona(e.target.value)}
                 style={{ background: '#1e1e1e', border: 'none', height: 32, width: '100%' }}
               >
@@ -1491,12 +1379,12 @@ function App() {
                       File System access is currently disabled. Go to Tools & Plugins to enable it.
                     </div>
                   ) : (
-                    <FileExplorer 
-                      workspacePath={workspacePath} 
+                    <FileExplorer
+                      workspacePath={workspacePath}
                     onFileSelect={(fileData) => {
                       setOpenFilesMain(prev => prev.find(f => f.name === fileData.name) ? prev : [...prev, fileData]);
                       setActiveFileIdMain(fileData.name);
-                    }} 
+                    }}
                     onFileSelectSplit={(fileData) => {
                       setOpenFilesSplit(prev => prev.find(f => f.name === fileData.name) ? prev : [...prev, fileData]);
                       setActiveFileIdSplit(fileData.name);
@@ -1511,13 +1399,13 @@ function App() {
                 <div style={{ padding: '0.75rem 1rem', fontSize: '0.7rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px', color: 'var(--text-secondary)' }}>Search</div>
                 <div style={{ padding: '0 1rem 1rem', flex: 1, overflowY: 'auto' }}>
                   <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1rem' }}>
-                    <input 
-                      type="text" 
+                    <input
+                      type="text"
                       list="search-history-list"
-                      value={searchQuery} 
+                      value={searchQuery}
                       onChange={(e) => setSearchQuery(e.target.value)}
-                      onKeyDown={(e) => { 
-                        if (e.key === 'Enter') handleSearch(); 
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') handleSearch();
                         else if (e.key === 'ArrowUp') {
                           if (searchHistory.length > 0 && searchHistoryIndex < searchHistory.length - 1) {
                             e.preventDefault();
@@ -1540,7 +1428,7 @@ function App() {
                     <datalist id="search-history-list">
                       {searchHistory.map((h, i) => <option key={i} value={h} />)}
                     </datalist>
-                    <button 
+                    <button
                       onClick={handleSearch}
                       disabled={isSearching}
                       style={{ background: 'var(--surface-color)', border: '1px solid var(--border-color)', color: 'var(--text-primary)', cursor: 'pointer', borderRadius: '4px', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '0.5rem' }}
@@ -1557,8 +1445,8 @@ function App() {
                         <div style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>No results found.</div>
                       ) : (
                         searchResults.map((res, i) => (
-                          <div 
-                            key={i} 
+                          <div
+                            key={i}
                             onClick={async () => {
                               try {
                                 const fileRes = await fetch('http://localhost:8789/api/tools/fs/read', {
@@ -1592,12 +1480,12 @@ function App() {
               <>
                 <div style={{ padding: '0.75rem 1rem', fontSize: '0.7rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px', color: 'var(--text-secondary)' }}>Orchestration</div>
                 <div style={{ padding: '0 1rem 1rem', flex: 1, display: 'flex', flexDirection: 'column', gap: '1rem', overflowY: 'auto' }}>
-                  <textarea 
-                    value={orchestrationTask} 
+                  <textarea
+                    value={orchestrationTask}
                     onChange={e => {
                       setOrchestrationTask(e.target.value);
                       setOrchHistoryIndex(-1);
-                    }} 
+                    }}
                     onKeyDown={(e) => {
                       if (e.key === 'Enter' && !e.shiftKey) {
                         e.preventDefault();
@@ -1747,10 +1635,10 @@ function App() {
                 <div style={{ display: 'flex', gap: '1rem', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
                   <span onClick={() => setActiveTerminalTab('problems')} style={{ cursor: 'pointer', color: activeTerminalTab === 'problems' ? 'var(--text-primary)' : 'var(--text-secondary)', borderBottom: activeTerminalTab === 'problems' ? '1px solid var(--text-primary)' : 'none' }}>Problems</span>
                   <span onClick={() => setActiveTerminalTab('output')} style={{ cursor: 'pointer', color: activeTerminalTab === 'output' ? 'var(--text-primary)' : 'var(--text-secondary)', borderBottom: activeTerminalTab === 'output' ? '1px solid var(--text-primary)' : 'none' }}>Output</span>
-                  
+
                   {shells.map((sh, idx) => (
                     <div key={sh.id} style={{ display: 'flex', alignItems: 'center', gap: '0.25rem' }}>
-                      <span 
+                      <span
                         onClick={() => setActiveTerminalTab(sh.id)}
                         style={{ cursor: 'pointer', color: activeTerminalTab === sh.id ? 'var(--text-primary)' : 'var(--text-secondary)', borderBottom: activeTerminalTab === sh.id ? '1px solid var(--text-primary)' : 'none' }}>
                         Terminal {idx + 1}
@@ -1765,14 +1653,14 @@ function App() {
                       }} style={{ background: 'transparent', border: 'none', color: '#94a3b8', cursor: 'pointer', padding: 0 }} title="Close Shell"><X size={12} /></button>
                     </div>
                   ))}
-                  <button onClick={() => { 
+                  <button onClick={() => {
                     const newId = `shell-${Date.now()}`;
                     setShells([...shells, { id: newId }]);
                     setActiveTerminalTab(newId);
                   }} style={{ background: 'transparent', border: 'none', color: '#94a3b8', cursor: 'pointer', display: 'flex', alignItems: 'center' }} title="New Shell"><Plus size={14} /></button>
 
                   {activeTask && (
-                    <span 
+                    <span
                       onClick={() => setActiveTerminalTab('task')}
                       style={{ cursor: 'pointer', color: activeTerminalTab === 'task' ? 'var(--text-primary)' : 'var(--text-secondary)', borderBottom: activeTerminalTab === 'task' ? '1px solid var(--text-primary)' : 'none' }}>
                       Task: {activeTask.split('-')[0]}...
@@ -1887,7 +1775,7 @@ function App() {
                   </div>
                 </div>
               ))}
-              
+
               {activeTool && (
                 <div className="tool-indicator">
                   <div className="tool-spinner"></div>
@@ -1901,9 +1789,9 @@ function App() {
                   <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: '#e67e22', marginBottom: '0.5rem', fontWeight: 'bold' }}>
                     <AlertTriangle size={18} /> Permission Required
                   </div>
-                  <p style={{ margin: '0 0 0.5rem 0', fontSize: '0.9rem', color: 'var(--text-primary)' }}>Astra wants to execute: <strong>{pendingTool.call.function.name}</strong></p>
+                  <p style={{ margin: '0 0 0.5rem 0', fontSize: '0.9rem', color: 'var(--text-primary)' }}>Astra wants to execute: <strong>{(pendingTool.call.function ? pendingTool.call.function.name : pendingTool.call.name)}</strong></p>
                   <pre style={{ background: '#1e1e1e', color: '#d4d4d4', padding: '0.5rem', borderRadius: '4px', overflowX: 'auto', fontSize: '0.8rem', margin: '0 0 1rem 0', border: '1px solid var(--border-color)' }}>
-                    {JSON.stringify(pendingTool.call.function.arguments, null, 2)}
+                    {JSON.stringify((pendingTool.call.function ? pendingTool.call.function.arguments : pendingTool.call.arguments), null, 2)}
                   </pre>
                   <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'flex-end' }}>
                     <button onClick={() => pendingTool.resolve(false)} style={{ background: 'transparent', border: '1px solid var(--border-color)', color: 'var(--text-primary)', padding: '0.5rem 1rem', borderRadius: '4px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '0.25rem' }}><X size={14}/> Reject</button>
@@ -1911,7 +1799,7 @@ function App() {
                   </div>
                 </div>
               )}
-              
+
               <div ref={messagesEndRef} />
             </div>
 
@@ -1926,18 +1814,18 @@ function App() {
                 ))}
               </div>
             )}
-            
+
             <div className="input-area" style={{ background: '#1e1e1e', borderRadius: '8px', padding: '0.5rem', display: 'flex', flexDirection: 'column', border: '1px solid var(--border-color)' }}>
-              <input 
-                type="file" 
-                multiple 
-                ref={fileInputRef} 
-                style={{ display: 'none' }} 
+              <input
+                type="file"
+                multiple
+                ref={fileInputRef}
+                style={{ display: 'none' }}
                 onChange={handleFileChange}
               />
-              
-              <textarea 
-                placeholder={`Ask ${PERSONAS[selectedPersona].name} to do something...`} 
+
+              <textarea
+                placeholder={`Ask ${PERSONAS[selectedPersona].name} to do something...`}
                 value={input}
                 onChange={(e) => {
                   setInput(e.target.value);
@@ -1970,7 +1858,7 @@ function App() {
 
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '0.25rem', padding: '0 0.25rem', flexWrap: 'wrap', gap: '0.5rem' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
-                  <button 
+                  <button
                     onClick={() => fileInputRef.current?.click()}
                     title="Attach File"
                     style={{ background: 'var(--surface-color)', border: '1px solid var(--border-color)', borderRadius: '4px', color: 'var(--text-secondary)', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', width: '24px', height: '24px' }}
@@ -1978,8 +1866,8 @@ function App() {
                     <span style={{ fontSize: '1rem', lineHeight: 1 }}>+</span>
                   </button>
                   <div style={{ background: 'var(--surface-color)', border: '1px solid var(--border-color)', borderRadius: '12px', padding: '0 0.5rem', display: 'flex', alignItems: 'center', height: '24px' }}>
-                    <select 
-                      value={selectedModel} 
+                    <select
+                      value={selectedModel}
                       onChange={(e) => setSelectedModel(e.target.value)}
                       style={{ background: 'transparent', border: 'none', color: 'var(--text-secondary)', fontSize: '0.75rem', cursor: 'pointer', outline: 'none', padding: 0, maxWidth: '140px', textOverflow: 'ellipsis' }}
                     >
@@ -1991,33 +1879,33 @@ function App() {
                     </select>
                   </div>
                 </div>
-                
+
                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                  <button 
+                  <button
                     onClick={toggleListening}
                     title="Voice Typing"
                     style={{ color: isListening ? '#ef4444' : 'var(--text-secondary)', background: 'transparent', border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', width: '32px', height: '32px', borderRadius: '4px', transition: 'all 0.2s ease' }}
                   >
                     {isListening ? <MicOff size={16} /> : <Mic size={16} />}
                   </button>
-                  
+
                   {isGenerating ? (
                     <button onClick={stopGeneration} title="Stop Generation" style={{ background: 'var(--surface-color)', border: '1px solid var(--border-color)', borderRadius: '6px', color: '#ef4444', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', width: '40px', height: '32px' }}>
                       <div style={{ width: 10, height: 10, background: '#ef4444', borderRadius: '2px' }}></div>
                     </button>
                   ) : (
-                    <button 
-                      onClick={() => handleSend(null, null)} 
-                      disabled={!input.trim() && attachments.length === 0} 
+                    <button
+                      onClick={() => handleSend(null, null)}
+                      disabled={!input.trim() && attachments.length === 0}
                       title="Send"
-                      style={{ 
-                        color: (!input.trim() && attachments.length === 0) ? 'var(--text-secondary)' : 'var(--bg-color)', 
+                      style={{
+                        color: (!input.trim() && attachments.length === 0) ? 'var(--text-secondary)' : 'var(--bg-color)',
                         background: (!input.trim() && attachments.length === 0) ? 'var(--border-color)' : 'var(--text-primary)',
-                        border: '1px solid var(--border-color)', 
-                        borderRadius: '6px', 
-                        cursor: 'pointer', 
-                        display: 'flex', 
-                        alignItems: 'center', 
+                        border: '1px solid var(--border-color)',
+                        borderRadius: '6px',
+                        cursor: 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
                         justifyContent: 'center',
                         gap: '6px',
                         padding: '0 12px',
@@ -2128,8 +2016,8 @@ function App() {
                   </div>
                   <div style={{ display: 'flex', gap: '0.5rem', position: 'relative' }}>
                     <div style={{ flex: 1, position: 'relative' }}>
-                      <input 
-                        type="text" 
+                      <input
+                        type="text"
                         value={ollamaSearch}
                         onChange={(e) => {
                           setOllamaSearch(e.target.value);
@@ -2137,15 +2025,15 @@ function App() {
                         }}
                         onFocus={() => setShowOllamaDropdown(true)}
                         onBlur={() => setTimeout(() => setShowOllamaDropdown(false), 200)}
-                        placeholder="Search for a model (e.g. qwen2.5-coder)" 
-                        style={{ width: '100%', padding: '0.5rem', borderRadius: '4px', border: '1px solid var(--border-color)', background: 'var(--surface-color)', color: 'var(--text-primary)', outline: 'none' }} 
+                        placeholder="Search for a model (e.g. qwen2.5-coder)"
+                        style={{ width: '100%', padding: '0.5rem', borderRadius: '4px', border: '1px solid var(--border-color)', background: 'var(--surface-color)', color: 'var(--text-primary)', outline: 'none' }}
                       />
                       {showOllamaDropdown && (
                         <div style={{ position: 'absolute', top: '100%', left: 0, right: 0, marginTop: '4px', background: 'var(--surface-color)', border: '1px solid var(--border-color)', borderRadius: '4px', zIndex: 1000, maxHeight: '200px', overflowY: 'auto', boxShadow: '0 4px 12px rgba(0,0,0,0.5)' }}>
                           {CURATED_OLLAMA_MODELS.filter(m => m.id.toLowerCase().includes(ollamaSearch.toLowerCase()) || m.name.toLowerCase().includes(ollamaSearch.toLowerCase())).length > 0 ? (
                             CURATED_OLLAMA_MODELS.filter(m => m.id.toLowerCase().includes(ollamaSearch.toLowerCase()) || m.name.toLowerCase().includes(ollamaSearch.toLowerCase())).map(model => (
-                              <div 
-                                key={model.id} 
+                              <div
+                                key={model.id}
                                 onMouseDown={() => {
                                   setOllamaSearch(model.id);
                                   setShowOllamaDropdown(false);
@@ -2167,13 +2055,13 @@ function App() {
                         </div>
                       )}
                     </div>
-                    <button 
+                    <button
                       onClick={() => {
                         if(ollamaSearch) {
                           handleInstallPlugin('ollama', ollamaSearch);
                           setOllamaSearch('');
                         }
-                      }} 
+                      }}
                       disabled={pluginInstallStates['ollama'] === 'installing'}
                       style={{ background: 'var(--text-primary)', color: 'var(--bg-color)', border: 'none', padding: '0.4rem 0.8rem', borderRadius: '4px', cursor: 'pointer', fontSize: '0.8rem', fontWeight: 'bold' }}
                     >
@@ -2187,7 +2075,7 @@ function App() {
                       <h4 style={{ margin: '0 0 0.25rem 0', color: 'var(--text-primary)' }}>{plugin.name}</h4>
                       <p style={{ margin: 0, fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{plugin.description}</p>
                     </div>
-                    <button 
+                    <button
                       onClick={() => {
                         if (plugin.action === 'Configure') {
                           setShowSettings(true);
@@ -2195,21 +2083,21 @@ function App() {
                         } else {
                           handleInstallPlugin(plugin.id);
                         }
-                      }} 
+                      }}
                       disabled={pluginInstallStates[plugin.id] === 'installing' || pluginInstallStates[plugin.id] === 'installed'}
-                      style={{ 
-                        background: pluginInstallStates[plugin.id] === 'installed' ? 'var(--bg-color)' : 'var(--text-primary)', 
-                        border: pluginInstallStates[plugin.id] === 'installed' ? '1px solid #2ecc71' : 'none', 
-                        color: pluginInstallStates[plugin.id] === 'installed' ? '#2ecc71' : 'var(--bg-color)', 
-                        padding: '0.4rem 0.8rem', borderRadius: '4px', 
-                        cursor: pluginInstallStates[plugin.id] === 'installing' || pluginInstallStates[plugin.id] === 'installed' ? 'not-allowed' : 'pointer', 
-                        fontSize: '0.8rem', fontWeight: 'bold' 
+                      style={{
+                        background: pluginInstallStates[plugin.id] === 'installed' ? 'var(--bg-color)' : 'var(--text-primary)',
+                        border: pluginInstallStates[plugin.id] === 'installed' ? '1px solid #2ecc71' : 'none',
+                        color: pluginInstallStates[plugin.id] === 'installed' ? '#2ecc71' : 'var(--bg-color)',
+                        padding: '0.4rem 0.8rem', borderRadius: '4px',
+                        cursor: pluginInstallStates[plugin.id] === 'installing' || pluginInstallStates[plugin.id] === 'installed' ? 'not-allowed' : 'pointer',
+                        fontSize: '0.8rem', fontWeight: 'bold'
                       }}>
                       {pluginInstallStates[plugin.id] === 'installing' ? 'Installing... ⏳' : pluginInstallStates[plugin.id] === 'installed' ? 'Installed ✅' : plugin.action}
                     </button>
                   </div>
                 ))}
-                
+
                 <div style={{ marginTop: '1rem', borderTop: '1px solid var(--border-color)', paddingTop: '1rem', textAlign: 'center' }}>
                   <a href="https://marketplace.visualstudio.com/" target="_blank" rel="noreferrer" style={{ color: 'var(--text-secondary)', textDecoration: 'none', fontSize: '0.8rem', display: 'inline-flex', alignItems: 'center', gap: '0.5rem' }}>
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
@@ -2230,7 +2118,7 @@ function App() {
 
 const JSONPreview = ({ data, title, isString = false }) => {
   const [expanded, setExpanded] = React.useState(false);
-  
+
   return (
     <details style={{ marginBottom: '0.5rem', cursor: 'pointer' }} onToggle={(e) => setExpanded(e.target.open)}>
       <summary style={{ color: 'var(--accent-color)' }}>{title}</summary>

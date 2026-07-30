@@ -37,7 +37,7 @@ export async function installBaseRoutes(page, { authority = 'Supervised' } = {})
   await page.route('http://localhost:8789/api/models', route => route.fulfill({
     status: 200,
     contentType: 'application/json',
-    body: JSON.stringify({ models: [{ name: 'test-model' }, { name: 'alternate-model' }] })
+    body: JSON.stringify({ models: [{ name: 'test-model' }, { name: 'alternate-model' }, { name: 'qwen2.5-coder:latest' }] })
   }));
 
   await page.route('http://localhost:8789/api/fs/list', route => route.fulfill({

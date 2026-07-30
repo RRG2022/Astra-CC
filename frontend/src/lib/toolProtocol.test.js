@@ -99,7 +99,7 @@ test('resolve strips protocol JSON from displayed content even when native calls
 });
 
 test('resolve falls back to text when there are no native calls', () => {
-  const r = resolveToolCalls([], '{"name":"read_file","parameters":{"filePath":"a.js"}}');
+  const r = resolveToolCalls([], '{"name":"read_file","parameters":{"filePath":"a.js"}}', true);
   assert.equal(r.toolCalls.length, 1);
   assert.equal(r.toolCalls[0].name, 'read_file');
   assert.equal(r.usedFallback, true);

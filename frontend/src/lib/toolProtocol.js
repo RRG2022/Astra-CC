@@ -150,14 +150,7 @@ export function extractToolCallsFromText(content) {
   return { calls, spans };
 }
 
-/**
- * Reconcile a completed model turn into the loop's canonical form.
- *
- * @param {object[]} nativeToolCalls raw `message.tool_calls` collected from the stream
- * @param {string}   content         accumulated `message.content`
- * @returns {{ toolCalls: {name,arguments,id?}[], cleanedContent: string, usedFallback: boolean }}
- */
-export function resolveToolCalls(nativeToolCalls, content) {
+export function resolveToolCalls(nativeToolCalls, content, allowFallback = false) {
   const seen = new Set();
   const toolCalls = [];
 
@@ -173,9 +166,9 @@ export function resolveToolCalls(nativeToolCalls, content) {
   const nativeCount = toolCalls.length;
   const { calls, spans } = extractToolCallsFromText(content);
 
-  // Text calls are only *executed* when the model produced no native ones, but
-  // the spans are always stripped so raw protocol JSON never reaches the user.
-  if (nativeCount === 0) {
+  // Text calls are only *executed* when explicitly allowed (e.g. models without native support)
+  // but the spans are always stripped so raw protocol JSON never reaches the user.
+  if (allowFallback && nativeCount === 0) {
     for (const call of calls) {
       const key = callKey(call);
       if (seen.has(key)) continue;
@@ -193,7 +186,7 @@ export function resolveToolCalls(nativeToolCalls, content) {
   return {
     toolCalls,
     cleanedContent,
-    usedFallback: nativeCount === 0 && toolCalls.length > 0
+    usedFallback: allowFallback && nativeCount === 0 && toolCalls.length > 0
   };
 }
 
