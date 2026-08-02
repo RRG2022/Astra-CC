@@ -1,13 +1,19 @@
-import { useAgentRuntime } from './lib/useAgentRuntime.js';
+import { useAgentSession } from './lib/useAgentSession.js';
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import ReactMarkdown from 'react-markdown';
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
-import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
-import Editor from '@monaco-editor/react';
-import { Play, FileText, Check, AlertCircle, Terminal, FileCode, Folder, XOctagon, CheckCircle, AlertTriangle, Paperclip, Mic, MicOff, Copy, Edit2, X, ChevronDown, ChevronRight, MessageSquare, Plus, RefreshCw, Save, Settings, Trash2, ArrowUp, Send, Search, Users, Puzzle, Brain } from 'lucide-react';
+import { Play, FileText, Check, AlertCircle, Folder, XOctagon, ChevronDown, ChevronRight, Plus, RefreshCw, X, ArrowUp, Brain, Settings, Trash2, Search, Users, Puzzle, MessageSquare, History, Terminal } from 'lucide-react';
 import InteractiveTerminal from './components/InteractiveTerminal';
 import LiveTerminal from './components/LiveTerminal';
 import FileExplorer from './components/FileExplorer';
+import MarkdownRenderer from './components/MarkdownRenderer';
+import JSONPreview from './components/JSONPreview';
+import ToolExecution from './components/ToolExecution';
+import ChatSidebar from './components/ChatSidebar';
+import EditorPanel from './components/EditorPanel';
+import CheckpointPanel from './components/CheckpointPanel';
+import { useWorkspaceStore } from './lib/stores/useWorkspaceStore';
+import { useUIStore } from './lib/stores/useUIStore';
+import { useFileStore } from './lib/stores/useFileStore';
+import { useAgentStore } from './lib/stores/useAgentStore';
 import './index.css';
 
 const CURATED_OLLAMA_MODELS = [
@@ -129,100 +135,23 @@ const TOOLS = [
     }
   }
 ];
-const ToolExecution = ({ tool, onRewind }) => {
-  const [expanded, setExpanded] = useState(false);
-
-  let taskId = null;
-  let checkpointSha = null;
-  if (tool.result && typeof tool.result === 'string') {
-    if (tool.result.includes('taskId')) {
-      try {
-        const parsed = JSON.parse(tool.result);
-        if (parsed.taskId) taskId = parsed.taskId;
-      } catch(e) {}
-    }
-    if (tool.result.includes('checkpointSha')) {
-      try {
-        const parsed = JSON.parse(tool.result);
-        if (parsed.checkpointSha) checkpointSha = parsed.checkpointSha;
-      } catch(e) {}
-    }
-  }
-
-  return (
-    <div className="tool-execution-log" style={{ opacity: tool.status === 'running' ? 0.7 : 1 }}>
-      <div className="tool-execution-header" onClick={() => setExpanded(!expanded)} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', padding: '0.5rem', background: '#252526', border: '1px solid var(--border-color)', borderRadius: expanded || tool.status === 'running' ? '4px 4px 0 0' : '4px' }}>
-        {tool.status === 'running' ? <div className="tool-spinner" style={{ width: '12px', height: '12px', border: '2px solid #ccc', borderTopColor: 'transparent', borderRadius: '50%', animation: 'spin 1s linear infinite' }} /> : (expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />)}
-        <span style={{ fontSize: '0.85rem', flex: 1 }}>
-          {tool.status === 'running' ? 'Running' : 'Executed'} <strong style={{ color: '#4fc1ff' }}>{tool.name}</strong>
-        </span>
-        {checkpointSha && onRewind && (
-          <button 
-            onClick={(e) => { e.stopPropagation(); onRewind(tool.arguments.filePath, checkpointSha); }}
-            style={{ display: 'flex', alignItems: 'center', gap: '4px', background: '#3c3c3c', border: '1px solid #555', color: '#ccc', borderRadius: '4px', padding: '2px 6px', fontSize: '0.75rem', cursor: 'pointer' }}
-          >
-            <RefreshCw size={12} /> Rewind
-          </button>
-        )}
-      </div>
-      {(expanded || tool.status === 'running') && (
-        <div className="tool-execution-body" style={{ padding: '0.5rem', background: '#1e1e1e', border: '1px solid var(--border-color)', borderTop: 'none', borderRadius: '0 0 4px 4px', fontSize: '0.8rem', color: '#ccc', overflowX: 'auto' }}>
-          {tool.status === 'running' ? (
-            <div>
-              <div style={{ color: '#888', marginBottom: '0.25rem' }}>Arguments:</div>
-              <pre style={{ margin: 0 }}>{JSON.stringify(tool.arguments, null, 2)}</pre>
-            </div>
-          ) : (
-            taskId ? (
-              <div>
-                <div style={{ color: '#888', marginBottom: '0.5rem' }}>[Task sent to background]</div>
-                <LiveTerminal taskId={taskId} />
-              </div>
-            ) : (
-              <pre style={{ margin: 0, whiteSpace: 'pre-wrap' }}>{tool.result}</pre>
-            )
-          )}
-        </div>
-      )}
-    </div>
-  );
-};
 
 function App() {
-  const [models, setModels] = useState([]);
-  const [traceLogs, setTraceLogs] = useState([]);
-  const [selectedModel, setSelectedModel] = useState(() => localStorage.getItem('astra_model') || '');
-  useEffect(() => { if (selectedModel) localStorage.setItem('astra_model', selectedModel); }, [selectedModel]);
-  const [selectedPersona, setSelectedPersona] = useState('repo_builder');
-  const [workspacePath, setWorkspacePath] = useState(() => localStorage.getItem('astra_workspace') || '');
-  const [messages, setMessages] = useState(() => {
-    const saved = localStorage.getItem('astra_memory');
-    try {
-      return saved && saved !== 'undefined' ? JSON.parse(saved) : [];
-    } catch(e) {
-      return [];
-    }
-  });
-  const [input, setInput] = useState(() => localStorage.getItem('astra_current_input') || '');
+  // Zustand Store selectors
+  const { workspacePath, fsNodes, setWorkspacePath, fetchDir, setFsNodes } = useWorkspaceStore();
+  const { openFilesMain, setOpenFilesMain, activeFileIdMain, setActiveFileIdMain, openFilesSplit, setOpenFilesSplit, activeFileIdSplit, setActiveFileIdSplit, handleSaveFile, handleNewFile } = useFileStore();
+  const { sidebarWidth, setSidebarWidth, leftSidebarWidth, setLeftSidebarWidth, isLeftSidebarOpen, setIsLeftSidebarOpen, activeActivity, setActiveActivity, showTerminalPane, setShowTerminalPane, activeTerminalTab, setActiveTerminalTab, shells, setShells, wordWrap, setWordWrap, minimapEnabled, setMinimapEnabled, toastNotification, setToastNotification, showSettings, setShowSettings, showBrowser, setShowBrowser, showAddTool, setShowAddTool, showPluginInstaller, setShowPluginInstaller, showWebSearchConfig, setShowWebSearchConfig, showToast } = useUIStore();
+  const { messages, setMessages, activeTool, setActiveTool, pendingTool, setPendingTool, selectedModel, setSelectedModel, selectedPersona, setSelectedPersona, promptHistory, setPromptHistory, models, setModels, modelsLoaded, setModelsLoaded, traceLogs, setTraceLogs, activeTask, setActiveTask } = useAgentStore();
 
-  const [activeTool, setActiveTool] = useState(null);
-  const [openFilesMain, setOpenFilesMain] = useState([]);
-  const [activeFileIdMain, setActiveFileIdMain] = useState(null);
-  const [openFilesSplit, setOpenFilesSplit] = useState([]);
-  const [activeFileIdSplit, setActiveFileIdSplit] = useState(null);
-  const [activeTask, setActiveTask] = useState(null);
-  const [showTerminalPane, setShowTerminalPane] = useState(false);
-  const [wordWrap, setWordWrap] = useState(true);
-  const [minimapEnabled, setMinimapEnabled] = useState(false);
-  const [shells, setShells] = useState([{ id: 'shell-1' }]);
-  const [activeTerminalTab, setActiveTerminalTab] = useState('shell-1');
+  // Local React state
+  const [input, setInput] = useState(() => localStorage.getItem('astra_current_input') || '');
   const [outputLogs, setOutputLogs] = useState([]);
   const [problems, setProblems] = useState(null);
   const [isLinting, setIsLinting] = useState(false);
-
+  const [isRightDragging, setIsRightDragging] = useState(false);
+  const [isLeftDragging, setIsLeftDragging] = useState(false);
 
   const [authorityLevel, setAuthorityLevel] = useState(() => localStorage.getItem('astra_authority_level') || 'Supervised');
-  const [pendingTool, setPendingTool] = useState(null);
   const [tools, setTools] = useState(() => {
     const saved = localStorage.getItem('astra_tools');
     try {
@@ -235,7 +164,6 @@ function App() {
       return [];
     }
   });
-  const [showAddTool, setShowAddTool] = useState(false);
   const [newToolForm, setNewToolForm] = useState({ name: '', endpoint: '', description: '' });
 
   useEffect(() => {
@@ -244,20 +172,6 @@ function App() {
 
   const handleToggleTool = (id) => {
     setTools(tools.map(t => t.id === id ? { ...t, enabled: !t.enabled } : t));
-  };
-  const [showBrowser, setShowBrowser] = useState(false);
-  const [toastNotification, setToastNotification] = useState(null);
-  const [fsNodes, setFsNodes] = useState([]);
-  const [sidebarWidth, setSidebarWidth] = useState(400);
-  const [leftSidebarWidth, setLeftSidebarWidth] = useState(250);
-  const [isRightDragging, setIsRightDragging] = useState(false);
-  const [isLeftDragging, setIsLeftDragging] = useState(false);
-  const [activeActivity, setActiveActivity] = useState('explorer');
-  const [isLeftSidebarOpen, setIsLeftSidebarOpen] = useState(true);
-
-  const showToast = (msg) => {
-    setToastNotification(msg);
-    setTimeout(() => setToastNotification(null), 3000);
   };
 
   const startRightResizing = useCallback((e) => {
@@ -359,23 +273,11 @@ function App() {
     };
   }, [isRightDragging, isLeftDragging]);
 
-  const [promptHistory, setPromptHistory] = useState(() => {
-    const saved = localStorage.getItem('astra_prompt_history');
-    try {
-      return saved && saved !== 'undefined' ? JSON.parse(saved) : [];
-    } catch(e) {
-      return [];
-    }
-  });
-  useEffect(() => {
-    localStorage.setItem('astra_prompt_history', JSON.stringify(promptHistory));
-  }, [promptHistory]);
   const [historyIndex, setHistoryIndex] = useState(-1);
   const [tempPrompt, setTempPrompt] = useState('');
   const [attachments, setAttachments] = useState([]);
   const [isListening, setIsListening] = useState(false);
   const fileInputRef = useRef(null);
-  const messagesEndRef = useRef(null);
 
   const editorRefMain = useRef(null);
   const editorRefSplit = useRef(null);
@@ -402,12 +304,14 @@ function App() {
   }, []);
 
   useEffect(() => {
-    localStorage.setItem('astra_workspace', workspacePath);
-    localStorage.setItem('astra_memory', JSON.stringify(messages));
-    localStorage.setItem('astra_prompt_history', JSON.stringify(promptHistory));
+    if (workspacePath) {
+      useAgentStore.getState().loadConversations(workspacePath);
+    }
+  }, [workspacePath]);
+
+  useEffect(() => {
     localStorage.setItem('astra_current_input', input);
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, activeTool, workspacePath, promptHistory, input]);
+  }, [input]);
 
   useEffect(() => {
     if (pendingTool) {
@@ -534,40 +438,21 @@ function App() {
     navigator.clipboard.writeText(text);
   };
 
-  const fetchDir = async (pathStr = '') => {
-    try {
-      const res = await fetch('http://localhost:8789/api/fs/list', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ dirPath: pathStr })
-      });
-      const data = await res.json();
-      if (data.success) {
-        setFsNodes(data.directories);
-      }
-    } catch (e) {
-      console.error(e);
-    }
-  };
   const [repoSelectorPath, setRepoSelectorPath] = useState('');
   const [repoSelectorNodes, setRepoSelectorNodes] = useState([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState(null);
   const [isSearching, setIsSearching] = useState(false);
   const [activeMenu, setActiveMenu] = useState(null);
-  const [showSettings, setShowSettings] = useState(false);
   const [settingsForm, setSettingsForm] = useState({ openai: '', anthropic: '', gemini: '' });
   const [orchestrationTask, setOrchestrationTask] = useState('');
   const [orchestrationLogs, setOrchestrationLogs] = useState([]);
   const [isOrchestrating, setIsOrchestrating] = useState(false);
-  const [showWebSearchConfig, setShowWebSearchConfig] = useState(false);
-  const [showPluginInstaller, setShowPluginInstaller] = useState(false);
   const [pluginInstallStates, setPluginInstallStates] = useState({});
   const [marketplacePlugins, setMarketplacePlugins] = useState([]);
   const [activeDownloads, setActiveDownloads] = useState({});
   const [ollamaSearch, setOllamaSearch] = useState('');
   const [showOllamaDropdown, setShowOllamaDropdown] = useState(false);
-  const [modelsLoaded, setModelsLoaded] = useState(false);
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -734,34 +619,6 @@ function App() {
     setActiveMenu(null);
   };
 
-  const handleSaveFile = async (filePath) => {
-    const fileObj = openFilesMain.find(f => f.name === filePath) || openFilesSplit.find(f => f.name === filePath);
-    if (!fileObj || !fileObj.unsaved) return;
-    try {
-      const res = await fetch('http://localhost:8789/api/tools/fs/write', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ filePath, content: fileObj.content, workspacePath })
-      });
-      const data = await res.json();
-      if (data.success) {
-        showToast('File saved successfully');
-        setOpenFilesMain(prev => prev.map(f => f.name === filePath ? { ...f, unsaved: false } : f));
-        setOpenFilesSplit(prev => prev.map(f => f.name === filePath ? { ...f, unsaved: false } : f));
-      }
-    } catch(e) {
-      console.error('Save failed', e);
-      showToast('Error saving file');
-    }
-  };
-
-  const handleNewFile = () => {
-    let i = 1;
-    while (openFilesMain.some(f => f.name === `Untitled-${i}`)) i++;
-    const newName = `Untitled-${i}`;
-    setOpenFilesMain(prev => [...prev, { name: newName, content: '', unsaved: true }]);
-    setActiveFileIdMain(newName);
-  };
 
   useEffect(() => {
     const handleKeyDown = (e) => {
@@ -967,11 +824,47 @@ function App() {
     return new Promise((resolve) => setPendingTool({ call, resolve }));
   }, []);
 
-  const runtime = useAgentRuntime({
+  const onToolExecuted = useCallback(async (name, argsObj, resultObj) => {
+    if (name === 'read_file' && resultObj.success) {
+      setOpenFilesMain(prev => {
+        const exists = prev.find(f => f.name === argsObj.filePath);
+        if (!exists) return [...prev, { name: argsObj.filePath, content: resultObj.content }];
+        return prev.map(f => f.name === argsObj.filePath ? { ...f, content: resultObj.content } : f);
+      });
+      setActiveFileIdMain(argsObj.filePath);
+    } else if (name === 'write_file' && resultObj.success) {
+      setOpenFilesMain(prev => {
+        const exists = prev.find(f => f.name === argsObj.filePath);
+        if (!exists) return [...prev, { name: argsObj.filePath, content: argsObj.content }];
+        return prev.map(f => f.name === argsObj.filePath ? { ...f, content: argsObj.content } : f);
+      });
+      setActiveFileIdMain(argsObj.filePath);
+    } else if (name === 'edit_file' && resultObj.success) {
+      const readRes = await fetch('http://localhost:8789/api/tools/fs/read', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filePath: argsObj.filePath, workspacePath })
+      });
+      const readData = await readRes.json();
+      if (readData.success) {
+        setOpenFilesMain(prev => {
+          const exists = prev.find(f => f.name === argsObj.filePath);
+          if (!exists) return [...prev, { name: argsObj.filePath, content: readData.content }];
+          return prev.map(f => f.name === argsObj.filePath ? { ...f, content: readData.content } : f);
+        });
+        setActiveFileIdMain(argsObj.filePath);
+      }
+    } else if (name === 'run_command' && resultObj.taskId) {
+      setActiveTask(resultObj.taskId);
+      setShowTerminalPane(true);
+      setActiveTerminalTab('task');
+    }
+  }, [workspacePath]);
+
+  const runtime = useAgentSession({
     onMessageUpdate,
     onTraceLog,
-    executeTool,
-    requestApproval,
+    onToolExecuted,
     model: selectedModel,
     tools: selectedModel.toLowerCase().includes('llama') || selectedModel.toLowerCase().includes('gpt') ? TOOLS : [],
     workspacePath,
@@ -1070,8 +963,9 @@ function App() {
         return newMessages;
       });
     } finally {
-
-
+      if (workspacePath) {
+        useAgentStore.getState().saveCurrentConversation(workspacePath);
+      }
     }
   };
 
@@ -1424,6 +1318,7 @@ function App() {
           <button onClick={() => { if(activeActivity === 'search') { setIsLeftSidebarOpen(!isLeftSidebarOpen); } else { setActiveActivity('search'); setIsLeftSidebarOpen(true); } }} style={{ background: 'transparent', border: 'none', color: activeActivity === 'search' && isLeftSidebarOpen ? 'var(--text-primary)' : 'var(--text-secondary)', cursor: 'pointer' }} title="Search"><AlertCircle size={24} strokeWidth={1.5} /></button>
           <button onClick={() => { if(activeActivity === 'orchestrate') { setIsLeftSidebarOpen(!isLeftSidebarOpen); } else { setActiveActivity('orchestrate'); setIsLeftSidebarOpen(true); } }} style={{ background: 'transparent', border: 'none', color: activeActivity === 'orchestrate' && isLeftSidebarOpen ? 'var(--text-primary)' : 'var(--text-secondary)', cursor: 'pointer' }} title="Orchestration"><Users size={24} strokeWidth={1.5} /></button>
           <button onClick={() => { if(activeActivity === 'tools') { setIsLeftSidebarOpen(!isLeftSidebarOpen); } else { setActiveActivity('tools'); setIsLeftSidebarOpen(true); } }} style={{ background: 'transparent', border: 'none', color: activeActivity === 'tools' && isLeftSidebarOpen ? 'var(--text-primary)' : 'var(--text-secondary)', cursor: 'pointer' }} title="Tools & Plugins"><Puzzle size={24} strokeWidth={1.5} /></button>
+          <button onClick={() => { if(activeActivity === 'checkpoints') { setIsLeftSidebarOpen(!isLeftSidebarOpen); } else { setActiveActivity('checkpoints'); setIsLeftSidebarOpen(true); } }} style={{ background: 'transparent', border: 'none', color: activeActivity === 'checkpoints' && isLeftSidebarOpen ? 'var(--text-primary)' : 'var(--text-secondary)', cursor: 'pointer' }} title="Checkpoints"><History size={24} strokeWidth={1.5} /></button>
           <button onClick={() => setShowTerminalPane(!showTerminalPane)} style={{ background: 'transparent', border: 'none', color: showTerminalPane ? 'var(--text-primary)' : 'var(--text-secondary)', cursor: 'pointer', marginTop: 'auto' }} title="Terminal"><Terminal size={24} strokeWidth={1.5} /></button>
         </div>
 
@@ -1458,6 +1353,9 @@ function App() {
                   )}
                 </div>
               </>
+            )}
+            {activeActivity === 'checkpoints' && (
+              <CheckpointPanel onClose={() => setIsLeftSidebarOpen(false)} handleRewind={handleRewind} />
             )}
             {activeActivity === 'explorer' && (
               <>
@@ -1648,74 +1546,21 @@ function App() {
 
         {/* Central Area: Editor / Terminal */}
         <div className="central-area" style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-          {/* Editor Pane (Top) */}
-          <div className="editor-pane" style={{ flex: activeTask ? '1 1 60%' : '1 1 100%', display: 'flex', flexDirection: 'row', overflow: 'hidden' }}>
-            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', borderRight: openFilesSplit.length > 0 ? '1px solid var(--border-color)' : 'none' }}>
-              {openFilesMain.length === 0 ? (
-                <div style={{ display: 'flex', flex: 1, alignItems: 'center', justifyContent: 'center', color: 'var(--text-secondary)' }}>
-                  <div style={{ textAlign: 'center' }}>
-                    <div style={{ width: 100, height: 100, margin: '0 auto', opacity: 0.1, background: 'var(--text-primary)', borderRadius: '50%' }}></div>
-                    <h2 style={{ marginTop: '1rem', fontWeight: 400 }}>Astra Editor</h2>
-                    <p>Select a file to view</p>
-                  </div>
-                </div>
-              ) : (
-                <div className="code-viewer-container" style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-                  <div className="code-viewer-header" style={{ display: 'flex', padding: '0', background: '#1e1e1e', borderBottom: '1px solid var(--border-color)', overflowX: 'auto' }}>
-                    {openFilesMain.map(f => (
-                      <div key={f.name} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.5rem 1rem', background: activeFileIdMain === f.name ? 'var(--bg-color)' : 'transparent', borderTop: activeFileIdMain === f.name ? '2px solid #2563eb' : '2px solid transparent', cursor: 'pointer', borderRight: '1px solid var(--border-color)' }} onClick={() => setActiveFileIdMain(f.name)}>
-                        <span style={{ fontSize: '0.85rem', color: activeFileIdMain === f.name ? 'var(--text-primary)' : 'var(--text-secondary)' }}>📄 {f.name.split('/').pop()}{f.unsaved ? ' *' : ''}</span>
-                        <button onClick={(e) => { e.stopPropagation(); setOpenFilesMain(prev => prev.filter(x => x.name !== f.name)); if(activeFileIdMain === f.name) setActiveFileIdMain(openFilesMain[0]?.name !== f.name ? openFilesMain[0]?.name : openFilesMain[1]?.name || null) }} style={{ background: 'transparent', border: 'none', color: '#94a3b8', cursor: 'pointer', padding: 0 }}><X size={14} /></button>
-                      </div>
-                    ))}
-                  </div>
-                  <div className="code-viewer-content" style={{ flex: 1, overflow: 'hidden' }}>
-                    <Editor
-                      height="100%"
-                      theme="vs-dark"
-                      path={activeFileIdMain || 'temp'}
-                      defaultLanguage={activeFileIdMain?.split('.').pop() || 'javascript'}
-                      value={openFilesMain.find(f => f.name === activeFileIdMain)?.content || ''}
-                      onMount={handleEditorMainMount}
-                      onChange={(value) => {
-                        setOpenFilesMain(prev => prev.map(f => f.name === activeFileIdMain ? { ...f, content: value, unsaved: true } : f));
-                      }}
-                      options={{ readOnly: false, minimap: { enabled: minimapEnabled }, wordWrap: wordWrap ? 'on' : 'off' }}
-                    />
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {openFilesSplit.length > 0 && (
-              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-                <div className="code-viewer-container" style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-                  <div className="code-viewer-header" style={{ display: 'flex', padding: '0', background: '#1e1e1e', borderBottom: '1px solid var(--border-color)', overflowX: 'auto' }}>
-                    {openFilesSplit.map(f => (
-                      <div key={f.name} style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', padding: '0.5rem 1rem', background: activeFileIdSplit === f.name ? 'var(--bg-color)' : 'transparent', borderTop: activeFileIdSplit === f.name ? '2px solid #2563eb' : '2px solid transparent', cursor: 'pointer', borderRight: '1px solid var(--border-color)' }} onClick={() => setActiveFileIdSplit(f.name)}>
-                        <span style={{ fontSize: '0.85rem', color: activeFileIdSplit === f.name ? 'var(--text-primary)' : 'var(--text-secondary)' }}>📄 {f.name.split('/').pop()}{f.unsaved ? ' *' : ''}</span>
-                        <button onClick={(e) => { e.stopPropagation(); setOpenFilesSplit(prev => prev.filter(x => x.name !== f.name)); if(activeFileIdSplit === f.name) setActiveFileIdSplit(openFilesSplit[0]?.name !== f.name ? openFilesSplit[0]?.name : openFilesSplit[1]?.name || null) }} style={{ background: 'transparent', border: 'none', color: '#94a3b8', cursor: 'pointer', padding: 0 }}><X size={14} /></button>
-                      </div>
-                    ))}
-                  </div>
-                  <div className="code-viewer-content" style={{ flex: 1, overflow: 'hidden' }}>
-                    <Editor
-                      height="100%"
-                      theme="vs-dark"
-                      path={activeFileIdSplit || 'temp'}
-                      defaultLanguage={activeFileIdSplit?.split('.').pop() || 'javascript'}
-                      value={openFilesSplit.find(f => f.name === activeFileIdSplit)?.content || ''}
-                      onMount={handleEditorSplitMount}
-                      onChange={(value) => {
-                        setOpenFilesSplit(prev => prev.map(f => f.name === activeFileIdSplit ? { ...f, content: value, unsaved: true } : f));
-                      }}
-                      options={{ readOnly: false, minimap: { enabled: minimapEnabled }, wordWrap: wordWrap ? 'on' : 'off' }}
-                    />
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
+          <EditorPanel
+            openFilesMain={openFilesMain}
+            setOpenFilesMain={setOpenFilesMain}
+            activeFileIdMain={activeFileIdMain}
+            setActiveFileIdMain={setActiveFileIdMain}
+            openFilesSplit={openFilesSplit}
+            setOpenFilesSplit={setOpenFilesSplit}
+            activeFileIdSplit={activeFileIdSplit}
+            setActiveFileIdSplit={setActiveFileIdSplit}
+            minimapEnabled={minimapEnabled}
+            wordWrap={wordWrap}
+            handleEditorMainMount={handleEditorMainMount}
+            handleEditorSplitMount={handleEditorSplitMount}
+            activeTask={activeTask}
+          />
 
           {/* Terminal Pane (Bottom) */}
           {showTerminalPane && (
@@ -1809,238 +1654,40 @@ function App() {
         {/* Right Resizer */}
         <div className={`resizer ${isRightDragging ? 'active' : ''}`} onMouseDown={startRightResizing} />
 
-        {/* Chat Sidebar */}
-        <div className="chat-sidebar" style={{ width: sidebarWidth }}>
-          <div className="messages" style={{ flex: 1, overflowY: 'auto', padding: '1rem', display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-            {messages.length === 0 && (
-              <div style={{ textAlign: 'center', color: 'var(--text-secondary)', marginTop: '2rem' }}>
-                How can I help you today?
-              </div>
-            )}
-            {messages.map((msg, idx) => (
-              <div key={idx} className={`message ${msg.role === 'user' ? 'user' : 'agent'}`}>
-                <ReactMarkdown
-                  components={{
-                    code({node, inline, className, children, ...props}) {
-                      const match = /language-(\w+)/.exec(className || '')
-                      if (!inline && match && match[1] === 'thought') {
-                        return (
-                          <div style={{ background: '#2c2c2c', color: '#a0a0a0', padding: '0.75rem', borderRadius: '4px', borderLeft: '3px solid #666', fontStyle: 'italic', marginBottom: '1rem', fontSize: '0.85rem' }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem', fontWeight: 'bold', color: '#bbb' }}>
-                              <Brain size={14} /> Thought Process
-                            </div>
-                            {String(children).replace(/\n$/, '')}
-                          </div>
-                        );
-                      }
-                      return !inline && match ? (
-                        <SyntaxHighlighter style={vscDarkPlus} language={match[1]} PreTag="div" {...props}>
-                          {String(children).replace(/\n$/, '')}
-                        </SyntaxHighlighter>
-                      ) : (
-                        <code className={className} {...props}>{children}</code>
-                      )
-                    }
-                  }}
-                >
-                  {msg.content ? msg.content.replace(/<think>/g, '```thought\n').replace(/<\/think>/g, '\n```\n') : ''}
-                </ReactMarkdown>
-                {msg.tool_executions && msg.tool_executions.map((t, i) => <ToolExecution key={i} tool={t} onRewind={handleRewind} />)}
-                <div className="message-actions" style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem', justifyContent: 'flex-end' }}>
-
-                    {msg.role === 'user' ? (
-                      <>
-                        <button className="action-btn" title="Edit Prompt" onClick={() => handleEditMessage(msg.content, idx)}>
-                          <Edit2 size={14} />
-                        </button>
-                        <button className="action-btn" title="Regenerate from here" onClick={() => handleRegenerateFrom(idx)}>
-                          <RefreshCw size={14} />
-                        </button>
-                      </>
-                    ) : null}
-                    <button className="action-btn" title="Copy to Clipboard" onClick={() => handleCopy(msg.content)}>
-                      <Copy size={14} />
-                    </button>
-                  </div>
-                </div>
-              ))}
-
-              {activeTool && (
-                <div className="tool-indicator">
-                  <div className="tool-spinner"></div>
-                  {activeTool}
-                </div>
-              )}
-
-              {/* Permission Inline Block */}
-              {pendingTool && (
-                <div style={{ background: '#2c2c2c', border: '1px solid #d35400', borderRadius: '8px', padding: '1rem', marginTop: '1rem' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: '#e67e22', marginBottom: '0.5rem', fontWeight: 'bold' }}>
-                    <AlertTriangle size={18} /> Permission Required
-                  </div>
-                  <p style={{ margin: '0 0 0.5rem 0', fontSize: '0.9rem', color: 'var(--text-primary)' }}>Astra wants to execute: <strong>{(pendingTool.call.function ? pendingTool.call.function.name : pendingTool.call.name)}</strong></p>
-                  {(() => {
-                    const funcName = pendingTool.call.function ? pendingTool.call.function.name : pendingTool.call.name;
-                    const args = pendingTool.call.function ? pendingTool.call.function.arguments : pendingTool.call.arguments;
-                    
-                    if (funcName === 'edit_file') {
-                      let parsedArgs = args;
-                      if (typeof args === 'string') {
-                        try { parsedArgs = JSON.parse(args); } catch(e) {}
-                      }
-                      
-                      return (
-                        <div style={{ margin: '0 0 1rem 0', border: '1px solid var(--border-color)', borderRadius: '4px', overflow: 'hidden' }}>
-                          <div style={{ background: '#333', color: '#ccc', padding: '0.25rem 0.5rem', fontSize: '0.75rem', borderBottom: '1px solid var(--border-color)' }}>{parsedArgs.filePath}</div>
-                          <pre style={{ background: '#3a1d1d', color: '#f8c2c2', padding: '0.5rem', margin: 0, overflowX: 'auto', fontSize: '0.8rem', borderBottom: '1px solid var(--border-color)' }}>
-                            <span style={{opacity: 0.5}}>- </span>{parsedArgs.oldString}
-                          </pre>
-                          <pre style={{ background: '#1d3a23', color: '#c2f8cb', padding: '0.5rem', margin: 0, overflowX: 'auto', fontSize: '0.8rem' }}>
-                            <span style={{opacity: 0.5}}>+ </span>{parsedArgs.newString}
-                          </pre>
-                        </div>
-                      );
-                    }
-                    
-                    return (
-                      <pre style={{ background: '#1e1e1e', color: '#d4d4d4', padding: '0.5rem', borderRadius: '4px', overflowX: 'auto', fontSize: '0.8rem', margin: '0 0 1rem 0', border: '1px solid var(--border-color)' }}>
-                        {JSON.stringify(args, null, 2)}
-                      </pre>
-                    );
-                  })()}
-                  <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'flex-end' }}>
-                    <button onClick={() => pendingTool.resolve(false)} style={{ background: 'transparent', border: '1px solid var(--border-color)', color: 'var(--text-primary)', padding: '0.5rem 1rem', borderRadius: '4px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '0.25rem' }}><X size={14}/> Reject</button>
-                    <button onClick={() => pendingTool.resolve(true)} style={{ background: 'var(--text-primary)', border: 'none', color: 'var(--bg-color)', padding: '0.5rem 1rem', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold', display: 'flex', alignItems: 'center', gap: '0.25rem' }}><Check size={14}/> Approve</button>
-                  </div>
-                </div>
-              )}
-
-              <div ref={messagesEndRef} />
-            </div>
-
-          <div style={{ padding: '0 1rem 1rem 1rem' }}>
-            {attachments.length > 0 && (
-              <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', marginBottom: '0.5rem' }}>
-                {attachments.map((file, i) => (
-                  <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '0.25rem', background: '#2d2d30', padding: '0.25rem 0.5rem', borderRadius: '4px', fontSize: '0.75rem', color: 'var(--text-primary)' }}>
-                    <Paperclip size={12} /> {file.name}
-                    <button onClick={() => removeAttachment(i)} style={{ background: 'transparent', border: 'none', padding: 0, marginLeft: '0.25rem', color: 'var(--text-secondary)', cursor: 'pointer' }}><X size={12} /></button>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            <div className="input-area" style={{ background: '#1e1e1e', borderRadius: '8px', padding: '0.5rem', display: 'flex', flexDirection: 'column', border: '1px solid var(--border-color)' }}>
-              <input
-                type="file"
-                multiple
-                ref={fileInputRef}
-                style={{ display: 'none' }}
-                onChange={handleFileChange}
-              />
-
-              <textarea
-                placeholder={`Ask ${PERSONAS[selectedPersona].name} to do something...`}
-                value={input}
-                onChange={(e) => {
-                  setInput(e.target.value);
-                  setHistoryIndex(-1);
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault();
-                    handleSend();
-                  } else if (e.key === 'ArrowUp') {
-                    if (promptHistory.length > 0 && historyIndex < promptHistory.length - 1) {
-                      e.preventDefault();
-                      if (historyIndex === -1) setTempPrompt(input);
-                      const nextIndex = historyIndex + 1;
-                      setHistoryIndex(nextIndex);
-                      setInput(promptHistory[nextIndex]);
-                    }
-                  } else if (e.key === 'ArrowDown') {
-                    if (historyIndex >= 0) {
-                      e.preventDefault();
-                      const prevIndex = historyIndex - 1;
-                      setHistoryIndex(prevIndex);
-                      setInput(prevIndex >= 0 ? promptHistory[prevIndex] : tempPrompt);
-                    }
-                  }
-                }}
-                rows={2}
-                style={{ width: '100%', boxSizing: 'border-box', background: 'transparent', border: 'none', resize: 'none', color: '#fff', padding: '0.5rem', outline: 'none', fontFamily: 'inherit', fontSize: '0.9rem', textAlign: 'left' }}
-              />
-
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '0.25rem', padding: '0 0.25rem', flexWrap: 'wrap', gap: '0.5rem' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', flexWrap: 'wrap' }}>
-                  <button
-                    onClick={() => fileInputRef.current?.click()}
-                    title="Attach File"
-                    style={{ background: 'var(--surface-color)', border: '1px solid var(--border-color)', borderRadius: '4px', color: 'var(--text-secondary)', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', width: '24px', height: '24px' }}
-                  >
-                    <span style={{ fontSize: '1rem', lineHeight: 1 }}>+</span>
-                  </button>
-                  <div style={{ background: 'var(--surface-color)', border: '1px solid var(--border-color)', borderRadius: '12px', padding: '0 0.5rem', display: 'flex', alignItems: 'center', height: '24px' }}>
-                    <select
-                      value={selectedModel}
-                      onChange={(e) => setSelectedModel(e.target.value)}
-                      style={{ background: 'transparent', border: 'none', color: 'var(--text-secondary)', fontSize: '0.75rem', cursor: 'pointer', outline: 'none', padding: 0, maxWidth: '140px', textOverflow: 'ellipsis' }}
-                    >
-                      {!modelsLoaded && <option>Loading...</option>}
-                      {modelsLoaded && models.length === 0 && <option value="">No local models</option>}
-                      {models.map(m => (
-                        <option key={m.name} value={m.name}>{m.name}</option>
-                      ))}
-                    </select>
-                  </div>
-                </div>
-
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                  <button
-                    onClick={toggleListening}
-                    title="Voice Typing"
-                    style={{ color: isListening ? '#ef4444' : 'var(--text-secondary)', background: 'transparent', border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', width: '32px', height: '32px', borderRadius: '4px', transition: 'all 0.2s ease' }}
-                  >
-                    {isListening ? <MicOff size={16} /> : <Mic size={16} />}
-                  </button>
-
-                  {isGenerating ? (
-                    <button onClick={stopGeneration} title="Stop Generation" style={{ background: 'var(--surface-color)', border: '1px solid var(--border-color)', borderRadius: '6px', color: '#ef4444', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', width: '40px', height: '32px' }}>
-                      <div style={{ width: 10, height: 10, background: '#ef4444', borderRadius: '2px' }}></div>
-                    </button>
-                  ) : (
-                    <button
-                      onClick={() => handleSend(null, null)}
-                      disabled={!input.trim() && attachments.length === 0}
-                      title="Send"
-                      style={{
-                        color: (!input.trim() && attachments.length === 0) ? 'var(--text-secondary)' : 'var(--bg-color)',
-                        background: (!input.trim() && attachments.length === 0) ? 'var(--border-color)' : 'var(--text-primary)',
-                        border: '1px solid var(--border-color)',
-                        borderRadius: '6px',
-                        cursor: 'pointer',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        gap: '6px',
-                        padding: '0 12px',
-                        height: '32px',
-                        fontWeight: 600,
-                        fontSize: '0.85rem',
-                        transition: 'all 0.2s ease',
-                        opacity: (!input.trim() && attachments.length === 0) ? 0.6 : 1
-                      }}
-                    >
-                      <Send size={14} /> Send
-                    </button>
-                  )}
-                </div>
-              </div>
-            </div>
-            </div>
-          </div>
-        </div>
+        <ChatSidebar
+          sidebarWidth={sidebarWidth}
+          messages={messages}
+          handleRewind={handleRewind}
+          activeTool={activeTool}
+          pendingTool={pendingTool}
+          attachments={attachments}
+          removeAttachment={removeAttachment}
+          PERSONAS={PERSONAS}
+          selectedPersona={selectedPersona}
+          input={input}
+          setInput={setInput}
+          promptHistory={promptHistory}
+          historyIndex={historyIndex}
+          setHistoryIndex={setHistoryIndex}
+          tempPrompt={tempPrompt}
+          setTempPrompt={setTempPrompt}
+          fileInputRef={fileInputRef}
+          handleFileChange={handleFileChange}
+          selectedModel={selectedModel}
+          setSelectedModel={setSelectedModel}
+          modelsLoaded={modelsLoaded}
+          models={models}
+          toggleListening={toggleListening}
+          isListening={isListening}
+          isGenerating={isGenerating}
+          stopGeneration={stopGeneration}
+          handleSend={handleSend}
+          handleEditMessage={handleEditMessage}
+          handleRegenerateFrom={handleRegenerateFrom}
+          handleCopy={handleCopy}
+        />
       </div>
+    </div>
 
 
       {/* Toast Notification */}
@@ -2229,31 +1876,5 @@ function App() {
     </>
   );
 }
-
-
-const JSONPreview = ({ data, title, isString = false }) => {
-  const [expanded, setExpanded] = React.useState(false);
-
-  return (
-    <details style={{ marginBottom: '0.5rem', cursor: 'pointer' }} onToggle={(e) => setExpanded(e.target.open)}>
-      <summary style={{ color: 'var(--accent-color)' }}>{title}</summary>
-      {expanded && (
-        <pre style={{ margin: '0.5rem 0', background: '#111', padding: '0.5rem', borderRadius: '4px', overflowX: 'auto', color: '#ccc', whiteSpace: isString ? 'pre-wrap' : 'pre', wordBreak: isString ? 'break-all' : 'normal' }}>
-          {(() => {
-            try {
-              const str = isString ? data : JSON.stringify(data, null, 2);
-              if (str && str.length > 50000) {
-                return str.substring(0, 50000) + '\n... [TRUNCATED FOR PERFORMANCE]';
-              }
-              return str || String(data);
-            } catch (e) {
-              return `Error rendering trace: ${e.message}`;
-            }
-          })()}
-        </pre>
-      )}
-    </details>
-  );
-};
 
 export default App;

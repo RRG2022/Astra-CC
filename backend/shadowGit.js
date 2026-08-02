@@ -169,9 +169,51 @@ async function rewindFile(workspacePath, absolutePath, commitSha) {
   return recoverySha;
 }
 
+function getFileHistory(workspacePath, absolutePath) {
+  ensureInit(workspacePath);
+  const gitDir = path.join(workspacePath, '.astra', 'shadow.git');
+  const relativeTarget = path.relative(workspacePath, absolutePath).replace(/\\/g, '/');
+
+  try {
+    const logOutput = execFileSync('git', [
+      '--git-dir', gitDir,
+      'log',
+      '--follow',
+      '--pretty=format:%H|%ad|%s',
+      '--date=iso',
+      '--',
+      relativeTarget
+    ]).toString().trim();
+
+    if (!logOutput) return [];
+    
+    return logOutput.split('\n').map(line => {
+      const [sha, date, message] = line.split('|');
+      return { sha, date: new Date(date).toLocaleString(), message };
+    });
+  } catch (err) {
+    return [];
+  }
+}
+
+function getFileContentAtCommit(workspacePath, absolutePath, commitSha) {
+  ensureInit(workspacePath);
+  const gitDir = path.join(workspacePath, '.astra', 'shadow.git');
+  const relativeTarget = path.relative(workspacePath, absolutePath).replace(/\\/g, '/');
+  _validateSha(gitDir, commitSha);
+
+  try {
+    return execFileSync('git', ['--git-dir', gitDir, 'show', `${commitSha}:${relativeTarget}`]).toString();
+  } catch (err) {
+    return '';
+  }
+}
+
 module.exports = {
   ensureInit,
   commitFile,
   rewindFile,
+  getFileHistory,
+  getFileContentAtCommit,
   withWorkspaceLock
 };

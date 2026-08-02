@@ -14,7 +14,7 @@ function resolveSafePath(workspacePath, targetPath) {
   if (!targetPath) throw new Error('targetPath is required');
 
   const absoluteWorkspace = path.resolve(workspacePath);
-  const absoluteTarget = path.resolve(workspacePath, targetPath);
+  const absoluteTarget = path.resolve(absoluteWorkspace, targetPath);
 
   // Reject explicit references to hidden framework/repo folders
   const normalizedTarget = absoluteTarget.replace(/\\/g, '/');
@@ -23,8 +23,9 @@ function resolveSafePath(workspacePath, targetPath) {
     throw new Error('Access denied: Paths inside .git or .astra are restricted');
   }
 
-  // Ensure the target is strictly inside the workspace boundary (traversal block)
-  if (!absoluteTarget.startsWith(absoluteWorkspace + path.sep) && absoluteTarget !== absoluteWorkspace) {
+  // Ensure the target is strictly inside the workspace boundary (traversal block) using path.relative
+  const relative = path.relative(absoluteWorkspace, absoluteTarget);
+  if (relative === '..' || relative.startsWith(`..${path.sep}`) || relative.startsWith('../') || path.isAbsolute(relative)) {
     throw new Error('Path traversal detected: Target path escapes workspace boundary');
   }
 
@@ -36,7 +37,8 @@ function resolveSafePath(workspacePath, targetPath) {
   }
   if (fs.existsSync(currentPath)) {
     const realCurrentPath = fs.realpathSync(currentPath);
-    if (!realCurrentPath.startsWith(absoluteWorkspace + path.sep) && realCurrentPath !== absoluteWorkspace) {
+    const relativeReal = path.relative(absoluteWorkspace, realCurrentPath);
+    if (relativeReal === '..' || relativeReal.startsWith(`..${path.sep}`) || relativeReal.startsWith('../') || path.isAbsolute(relativeReal)) {
       throw new Error('Symlink escape detected: Target resolves outside workspace');
     }
   }

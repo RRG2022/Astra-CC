@@ -4,23 +4,25 @@ const morgan = require('morgan');
 const fs = require('fs');
 const path = require('path');
 const { exec, spawn } = require('child_process');
-const axios = require('axios');
 const http = require('http');
-const WebSocket = require('ws');
-const pty = require('node-pty');
-const os = require('os');
-const { resolveSafePath } = require('./security/safe-path');
 const { validatePluginName } = require('./plugins/plugin-policy');
-const shadowGit = require('./shadowGit');
-const crypto = require('crypto');
-const app = express();
+const { initPTY } = require('./src/ptyManager');
 
-// Middleware (Must be before routes)
+// Routers
+const agentRouter = require('./src/routes/agent');
+const filesRouter = require('./src/routes/files');
+const gitRouter = require('./src/routes/git');
+const { router: settingsRouter } = require('./src/routes/settings');
+const conversationsRouter = require('./src/routes/conversations');
+const sessionsRouter = require('./src/routes/sessions');
+
+const app = express();
+const PORT = process.env.PORT || 8789;
+const server = http.createServer(app);
+
+// Middleware
 const ALLOWED_ORIGINS = ['http://localhost:5173', 'http://127.0.0.1:5173'];
 
-// Requests with no Origin (curl, local tooling) are allowed through; the
-// loopback bind on server.listen is what keeps those local. A request carrying
-// a foreign Origin is a browser request from another site and is refused.
 function isAllowedOrigin(origin) {
   return !origin || ALLOWED_ORIGINS.includes(origin);
 }
@@ -29,49 +31,12 @@ app.use(cors({ origin: ALLOWED_ORIGINS }));
 app.use(express.json({ limit: '50mb' }));
 app.use(morgan('dev'));
 
-// Explicit Origin Defense (Defense in Depth)
+// Explicit Origin Defense
 app.use((req, res, next) => {
   if (!isAllowedOrigin(req.headers.origin)) {
     return res.status(403).json({ error: 'Forbidden: Invalid Origin' });
   }
   next();
-});
-
-
-// Plugins Architecture Scaffold
-const PLUGINS_DIR = path.join(__dirname, 'plugins');
-if (!fs.existsSync(PLUGINS_DIR)) {
-  fs.mkdirSync(PLUGINS_DIR);
-}
-
-app.get('/api/plugins', (req, res) => {
-  try {
-    const plugins = fs.readdirSync(PLUGINS_DIR)
-      .filter(f => f.endsWith('.js'))
-      .map(f => ({ name: f.replace('.js', ''), path: path.join(PLUGINS_DIR, f) }));
-    res.json(plugins);
-  } catch (error) {
-    res.json([]);
-  }
-});
-
-// Execute a plugin dynamically
-app.post('/api/plugins/execute', (req, res) => {
-  const { pluginName, args } = req.body;
-  try {
-    const validPluginName = validatePluginName(pluginName);
-    const pluginPath = path.join(PLUGINS_DIR, validPluginName + '.js');
-    if (fs.existsSync(pluginPath)) {
-      const plugin = require(pluginPath);
-      if (typeof plugin.execute === 'function') {
-        const result = plugin.execute(args);
-        return res.json({ success: true, result });
-      }
-    }
-    res.status(404).json({ success: false, error: 'Plugin not found or invalid' });
-  } catch (e) {
-    return res.status(403).json({ success: false, error: e.message });
-  }
 });
 
 // Output Stream Endpoint (SSE)
@@ -108,13 +73,67 @@ console.error = (...args) => {
   broadcastLog('error', ...args);
 };
 
+// Health Check
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok', message: 'Astra Backend is running.' });
+});
 
-const { exec: execCmd } = require('child_process');
+// Mount Routers under /api
+app.use('/api', agentRouter);
+app.use('/api', filesRouter);
+app.use('/api/shadow', gitRouter);
+app.use('/api/settings', settingsRouter);
+app.use('/api/conversations', conversationsRouter);
+app.use('/api/sessions', sessionsRouter);
+
+// Plugins Architecture Scaffold
+const PLUGINS_DIR = path.join(__dirname, 'plugins');
+if (!fs.existsSync(PLUGINS_DIR)) {
+  fs.mkdirSync(PLUGINS_DIR);
+}
+
+app.get('/api/plugins', (req, res) => {
+  try {
+    const plugins = fs.readdirSync(PLUGINS_DIR)
+      .filter(f => f.endsWith('.js'))
+      .map(f => ({ name: f.replace('.js', ''), path: path.join(PLUGINS_DIR, f) }));
+    res.json(plugins);
+  } catch (error) {
+    res.json([]);
+  }
+});
+
+app.post('/api/plugins/execute', (req, res) => {
+  const { pluginName, args } = req.body;
+  try {
+    const validPluginName = validatePluginName(pluginName);
+    const pluginPath = path.resolve(PLUGINS_DIR, validPluginName + '.js');
+    
+    // Ensure target path is strictly inside PLUGINS_DIR
+    const relative = path.relative(PLUGINS_DIR, pluginPath);
+    if (relative === '..' || relative.startsWith('..' + path.sep) || relative.startsWith('../') || path.isAbsolute(relative)) {
+      return res.status(403).json({ success: false, error: 'Plugin path escapes plugins directory boundary' });
+    }
+
+    if (fs.existsSync(pluginPath)) {
+      const plugin = require(pluginPath);
+      if (typeof plugin.execute === 'function') {
+        const result = plugin.execute(args);
+        return res.json({ success: true, result });
+      }
+    }
+    res.status(404).json({ success: false, error: 'Plugin not found or invalid' });
+  } catch (e) {
+    return res.status(403).json({ success: false, error: e.message });
+  }
+});
+
+// ESLint Problems Endpoint
 app.post('/api/problems', (req, res) => {
   const { workspace } = req.body;
   if (!workspace) return res.json({ problems: [] });
   
-  execCmd('npx eslint . -f json', { cwd: workspace }, (error, stdout, stderr) => {
+  exec('npx eslint . -f json', { cwd: workspace }, (error, stdout, stderr) => {
     try {
       const results = JSON.parse(stdout);
       const problems = [];
@@ -131,523 +150,10 @@ app.post('/api/problems', (req, res) => {
       res.json({ problems });
     } catch (e) {
       console.error('Linting parsing error', e.message);
-      // Fallback if no eslint
       res.json({ problems: [] });
     }
   });
 });
-
-// Start Express Server
-const PORT = process.env.PORT || 8789;
-const server = http.createServer(app);
-
-// Middleware moved to top
-// Ollama API configuration
-const OLLAMA_BASE_URL = 'http://localhost:11434';
-
-// Sampling and context defaults. Without an explicit num_ctx, Ollama runs every
-// model at its 4096 default regardless of what the model supports, so a single
-// read_file evicts the system prompt and the user's task from the window.
-// `keep_alive` is a top-level field, NOT an option — inside `options` it is
-// silently ignored.
-const OLLAMA_OPTIONS = {
-  num_ctx: parseInt(process.env.ASTRA_NUM_CTX || '8192', 10),
-  temperature: parseFloat(process.env.ASTRA_TEMPERATURE || '0.1'),
-  top_p: 0.9,
-  repeat_penalty: 1.05
-};
-const OLLAMA_KEEP_ALIVE = process.env.ASTRA_KEEP_ALIVE || '30m';
-
-// Health Check
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', message: 'Astra Backend is running.' });
-});
-
-const SETTINGS_FILE = path.join(__dirname, 'settings.json');
-
-function getSettings() {
-  if (fs.existsSync(SETTINGS_FILE)) {
-    return JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'));
-  }
-  return { apiKeys: { openai: '', anthropic: '', gemini: '' } };
-}
-
-app.get('/api/settings', (req, res) => {
-  res.json(getSettings());
-});
-
-app.post('/api/settings', (req, res) => {
-  fs.writeFileSync(SETTINGS_FILE, JSON.stringify(req.body, null, 2));
-  res.json({ success: true });
-});
-
-// Proxy to get models from Ollama + External
-app.get('/api/models', async (req, res) => {
-    let externalModels = [];
-    try {
-      const settings = getSettings();
-      if (settings.apiKeys.openai) externalModels.push({ name: 'gpt-4o', family: 'openai' });
-      if (settings.apiKeys.anthropic) externalModels.push({ name: 'claude-3-opus', family: 'anthropic' });
-      if (settings.apiKeys.gemini) externalModels.push({ name: 'gemini-1.5-pro', family: 'google' });
-  
-      const response = await axios.get(`${OLLAMA_BASE_URL}/api/tags`);
-      const data = response.data;
-      data.models = [...externalModels, ...(data.models || [])];
-      res.json(data);
-    } catch (error) {
-      console.error('Error fetching models from Ollama:', error.message);
-      res.json({ models: externalModels });
-    }
-});
-
-app.post('/api/models/pull', (req, res) => {
-  const { model } = req.body;
-  // Spawn ollama pull in background
-  const p = require('child_process').spawn('ollama', ['pull', model], { stdio: 'ignore', detached: true });
-  p.on('error', (err) => {
-    console.error('Failed to spawn ollama pull:', err.message);
-  });
-  p.unref();
-  res.json({ success: true, message: `Started pulling ${model} in background` });
-});
-
-// Multi-Agent Orchestration scaffold
-app.post('/api/orchestrate', (req, res) => {
-  const { task, agents } = req.body;
-  // Scaffold: Simulate multiple agents debating/working.
-  const logs = [
-    { role: 'planner', text: 'Analyzing task: ' + task },
-    { role: 'planner', text: 'Breaking down into sub-tasks and delegating to ' + agents.join(', ') },
-    { role: 'coder', text: 'Writing initial implementation...' },
-    { role: 'reviewer', text: 'Reviewing code. Found 2 issues. Suggesting fixes.' },
-    { role: 'coder', text: 'Applying fixes.' },
-    { role: 'planner', text: 'Task completed successfully.' }
-  ];
-  
-  // Simulate delay
-  setTimeout(() => {
-    res.json({ success: true, message: 'Orchestration finished', logs });
-  }, 1500);
-});
-
-// Proxy to generate a response from Ollama (streaming or single response)
-app.post('/api/generate', async (req, res) => {
-  try {
-    const { model, prompt, stream } = req.body;
-    
-    if (stream) {
-      const response = await axios({
-        method: 'post',
-        url: `${OLLAMA_BASE_URL}/api/generate`,
-        data: { model, prompt, stream: true },
-        responseType: 'stream'
-      });
-      
-      response.data.pipe(res);
-    } else {
-      const response = await axios.post(`${OLLAMA_BASE_URL}/api/generate`, {
-        model,
-        prompt,
-        stream: false
-      });
-      res.json(response.data);
-    }
-  } catch (error) {
-    console.error('Error in generation:', error.message);
-    res.status(500).json({ error: 'Generation failed.' });
-  }
-});
-
-// Proxy to generate chat (chat endpoint for conversation history)
-app.post('/api/chat', async (req, res) => {
-  try {
-    const { model, messages, stream, tools } = req.body;
-    
-    const attemptRequest = async (useTools) => {
-      const payload = {
-        model,
-        messages,
-        stream,
-        tools: useTools ? tools : undefined,
-        options: OLLAMA_OPTIONS,
-        keep_alive: OLLAMA_KEEP_ALIVE
-      };
-      if (!useTools) delete payload.tools;
-      
-      return await axios({
-        method: 'post',
-        url: `${OLLAMA_BASE_URL}/api/chat`,
-        data: payload,
-        responseType: stream ? 'stream' : 'json',
-        validateStatus: false // Prevent Axios from throwing on 400
-      });
-    };
-
-    let response = await attemptRequest(true);
-
-    if (response.status === 400) {
-      let errMsg = '';
-      if (stream) {
-        errMsg = await new Promise((resolve) => {
-           let data = '';
-           response.data.on('data', chunk => data += chunk.toString());
-           response.data.on('end', () => resolve(data));
-        });
-      } else {
-        errMsg = JSON.stringify(response.data);
-      }
-      
-      if (errMsg.includes('does not support tools')) {
-        console.log(`[Ollama] Model ${model} does not support tools. Retrying without tools...`);
-        // Strip out any tool-related messages to avoid invalid role errors on retry
-        const cleanedMessages = messages.filter(m => m.role !== 'tool').map(m => {
-          const { tool_calls, ...rest } = m;
-          return rest;
-        });
-        
-        const retryPayload = {
-          model,
-          messages: cleanedMessages,
-          stream,
-          options: OLLAMA_OPTIONS,
-          keep_alive: OLLAMA_KEEP_ALIVE
-        };
-        const retryResponse = await axios({
-          method: 'post',
-          url: `${OLLAMA_BASE_URL}/api/chat`,
-          data: retryPayload,
-          responseType: stream ? 'stream' : 'json'
-        });
-        
-        if (stream) {
-          return retryResponse.data.pipe(res);
-        } else {
-          return res.json(retryResponse.data);
-        }
-      } else {
-         return res.status(400).send(errMsg);
-      }
-    }
-
-    if (stream) {
-      response.data.pipe(res);
-    } else {
-      res.json(response.data);
-    }
-  } catch (error) {
-    console.error('Error in chat generation:', error.message);
-    res.status(500).json({ error: 'Chat generation failed.' });
-  }
-});
-
-// Agent Tool: File System (Read)
-app.post('/api/tools/fs/read', require('./src/handlers/fs').handleFsRead);
-
-// Agent Tool: File System (List Directory)
-app.post('/api/tools/fs/list', (req, res) => {
-  const { directoryPath, workspacePath } = req.body;
-  
-  try {
-    const absolutePath = directoryPath && workspacePath 
-      ? resolveSafePath(workspacePath, directoryPath) 
-      : (directoryPath ? path.resolve(directoryPath) : process.cwd());
-        
-    if (!fs.existsSync(absolutePath)) {
-      return res.status(404).json({ error: `Directory not found: ${absolutePath}` });
-    }
-    
-    if (!fs.statSync(absolutePath).isDirectory()) {
-      return res.status(400).json({ error: `Path is not a directory: ${absolutePath}` });
-    }
-
-    const items = fs.readdirSync(absolutePath).map(file => {
-      try {
-        const stats = fs.statSync(path.join(absolutePath, file));
-        return {
-          name: file,
-          isDirectory: stats.isDirectory(),
-          size: stats.size
-        };
-      } catch(e) {
-        return { name: file, isDirectory: false, size: 0, error: true };
-      }
-    });
-    
-    res.json({ success: true, path: absolutePath, items });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// Agent Tool: File System (Grep Search)
-app.post('/api/tools/fs/grep', (req, res) => {
-  const { query, directoryPath, workspacePath } = req.body;
-  if (!query) {
-    return res.status(400).json({ error: 'query is required' });
-  }
-  
-  try {
-    const absolutePath = directoryPath && workspacePath 
-      ? resolveSafePath(workspacePath, directoryPath) 
-      : (directoryPath ? path.resolve(directoryPath) : process.cwd());
-        
-    if (!fs.existsSync(absolutePath)) {
-      return res.status(404).json({ error: `Directory not found: ${absolutePath}` });
-    }
-
-    const results = [];
-    
-    function searchRecursive(currentPath) {
-      if (results.length >= 50) return; // Limit to 50 results
-      
-      let items;
-      try {
-        items = fs.readdirSync(currentPath);
-      } catch(e) { return; }
-      
-      for (const item of items) {
-        if (results.length >= 50) break;
-        if (item === 'node_modules' || item === '.git' || item === 'dist' || item === 'build' || item === '.next') continue;
-        
-        const itemPath = path.join(currentPath, item);
-        let stat;
-        try {
-          stat = fs.statSync(itemPath);
-        } catch(e) { continue; }
-        
-        if (stat.isDirectory()) {
-          searchRecursive(itemPath);
-        } else if (stat.isFile()) {
-          try {
-            // Only read first 250KB to avoid large binaries
-            if (stat.size > 250000) continue;
-            
-            const content = fs.readFileSync(itemPath, 'utf8');
-            const lines = content.split('\n');
-            lines.forEach((line, index) => {
-              if (line.includes(query) && results.length < 50) {
-                results.push({
-                  file: path.relative(workspacePath || absolutePath, itemPath),
-                  line: index + 1,
-                  content: line.trim()
-                });
-              }
-            });
-          } catch(e) {
-            // skip unreadable/binary
-          }
-        }
-      }
-    }
-    
-    searchRecursive(absolutePath);
-    res.json({ success: true, count: results.length, results });
-  } catch (error) {
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-
-const activeTasks = {};
-
-app.post('/api/tools/terminal/run', (req, res) => {
-  const { command, workspacePath, cwd } = req.body;
-  
-  try {
-    const executionDir = cwd ? path.resolve(workspacePath, cwd) : workspacePath;
-    
-    if (!executionDir.startsWith(workspacePath)) {
-      return res.status(403).json({ error: 'Command execution outside workspace is forbidden' });
-    }
-
-    const taskId = crypto.randomUUID();
-    let output = '';
-
-    // Use PowerShell explicitly with absolute path to avoid PATH issues
-    const powershellPath = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe';
-    const child = spawn(powershellPath, ['-Command', command], { cwd: executionDir });
-    activeTasks[taskId] = { child, output };
-
-    child.on('error', (err) => {
-      console.error(`Failed to start process: ${err.message}`);
-      activeTasks[taskId].output += `\nError: Failed to start process: ${err.message}\n`;
-    });
-
-    child.stdout.on('data', data => {
-      activeTasks[taskId].output += data.toString();
-    });
-    child.stderr.on('data', data => {
-      activeTasks[taskId].output += data.toString();
-    });
-
-    let isDone = false;
-    
-    child.on('close', (code) => {
-      isDone = true;
-      if (!res.headersSent) {
-        res.json({
-          success: code === 0,
-          stdout: activeTasks[taskId].output.trim(),
-          stderr: ''
-        });
-      }
-    });
-
-    // Wait up to 5 seconds. If not done, send to background.
-    setTimeout(() => {
-      if (!isDone && !res.headersSent) {
-        res.json({
-          success: true,
-          stdout: `[Task sent to background] Task ID: ${taskId}\nPartial Output:\n${activeTasks[taskId].output.trim()}`,
-          taskId
-        });
-      }
-    }, 5000);
-
-  } catch (error) {
-    if (!res.headersSent) {
-      res.status(500).json({ error: error.message });
-    }
-  }
-});
-
-app.get('/api/tools/terminal/stream/:taskId', (req, res) => {
-  const task = activeTasks[req.params.taskId];
-  if (!task) return res.status(404).json({ error: 'Task not found' });
-  res.json({ output: task.output });
-});
-
-app.post('/api/tools/terminal/kill/:taskId', (req, res) => {
-  const task = activeTasks[req.params.taskId];
-  if (!task) return res.status(404).json({ error: 'Task not found' });
-  
-  try {
-    const { spawnSync } = require('child_process');
-    spawnSync('taskkill', ['/pid', task.child.pid, '/f', '/t']);
-  } catch(e) {
-    task.child.kill();
-  }
-  
-  task.output += '\n\n[Task killed by user]';
-  res.json({ success: true });
-});
-
-// Search in Workspace
-app.post('/api/fs/search', (req, res) => {
-  const { workspacePath, query } = req.body;
-  if (!workspacePath || !query) {
-    return res.status(400).json({ success: false, error: 'workspacePath and query are required' });
-  }
-
-  const results = [];
-  const IGNORE_DIRS = ['node_modules', '.git', 'dist', 'build', '.next', '.agents', '.dart_tool', '.vscode'];
-
-  function searchDir(dirPath) {
-    if (results.length > 150) return; // Limit results
-    try {
-      const entries = fs.readdirSync(dirPath, { withFileTypes: true });
-      for (const entry of entries) {
-        if (results.length > 150) return;
-        const fullPath = path.join(dirPath, entry.name).replace(/\\/g, '/');
-        
-        if (entry.isDirectory()) {
-          if (!IGNORE_DIRS.includes(entry.name)) {
-            searchDir(fullPath);
-          }
-        } else if (entry.isFile()) {
-          try {
-            let matchedFilename = false;
-            if (entry.name.toLowerCase().includes(query.toLowerCase())) {
-              results.push({
-                file: fullPath,
-                line: 1,
-                text: '(Filename match)'
-              });
-              matchedFilename = true;
-              if (results.length > 150) return;
-            }
-
-            const stat = fs.statSync(fullPath);
-            if (stat.size > 1024 * 1024) continue; // Skip files > 1MB
-            
-            const content = fs.readFileSync(fullPath, 'utf8');
-            if (content.toLowerCase().includes(query.toLowerCase())) {
-              const lines = content.split('\n');
-              for (let i = 0; i < lines.length; i++) {
-                if (lines[i].toLowerCase().includes(query.toLowerCase())) {
-                  results.push({
-                    file: fullPath,
-                    line: i + 1,
-                    text: lines[i].trim().substring(0, 120)
-                  });
-                  if (results.length > 150) return;
-                }
-              }
-            }
-          } catch (e) {
-            // Ignore read errors
-          }
-        }
-      }
-    } catch (e) {
-      console.error('Search error in ' + dirPath, e);
-    }
-  }
-
-  searchDir(workspacePath);
-  res.json({ success: true, results });
-});
-
-// Filesystem browsing endpoint
-app.post('/api/fs/list', async (req, res) => {
-  const { dirPath } = req.body;
-  try {
-    const items = await fs.promises.readdir(dirPath || 'C:\\', { withFileTypes: true });
-    
-    const directories = items.map(item => ({
-      name: item.name,
-      path: path.join(dirPath || 'C:\\', item.name),
-      isDirectory: item.isDirectory()
-    }));
-    
-    // Sort directories first, then files alphabetically
-    directories.sort((a, b) => {
-      if (a.isDirectory && !b.isDirectory) return -1;
-      if (!a.isDirectory && b.isDirectory) return 1;
-      return a.name.localeCompare(b.name);
-    });
-
-    res.json({ success: true, directories });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Native folder browser endpoint
-app.get('/api/fs/browse-native', (req, res) => {
-  const scriptPath = path.join(__dirname, 'browse.ps1');
-  exec(`powershell.exe -STA -ExecutionPolicy Bypass -File "${scriptPath}"`, (error, stdout, stderr) => {
-    if (error) {
-      console.error(error);
-      return res.status(500).json({ success: false, error: error.message });
-    }
-    const selectedPath = stdout.trim();
-    if (selectedPath) {
-      res.json({ success: true, path: selectedPath });
-    } else {
-      res.json({ success: false, error: 'User cancelled' });
-    }
-  });
-});
-
-// Agent Tool: File System (Write)
-app.post('/api/tools/fs/write', require('./src/handlers/fs').handleFsWrite);
-
-app.post('/api/tools/fs/edit', require('./src/handlers/fs').handleFsEdit);
-
-app.post('/api/tools/fs/rewind', require('./src/handlers/fs').handleFsRewind);
-
-// (Removed duplicate terminal/run)
 
 app.get('/api/plugins/marketplace', (req, res) => {
   const plugins = [
@@ -692,9 +198,7 @@ app.post('/api/plugins/install', (req, res) => {
   if (pluginId === 'ollama') {
     const targetModel = modelName || 'tinydolphin';
     console.log(`[Ollama] Starting background pull for ${targetModel}...`);
-    
     activeDownloads[targetModel] = { status: 'starting' };
-    
     const child = spawn('ollama', ['pull', targetModel]);
     
     child.on('error', (err) => {
@@ -729,82 +233,17 @@ app.post('/api/plugins/install', (req, res) => {
       setTimeout(() => { delete activeDownloads[targetModel]; }, 10000);
     });
 
-    return res.json({ success: true, message: `Download started for ${targetModel} in the background. Check your terminal for progress.` });
+    return res.json({ success: true, message: `Download started for ${targetModel} in the background.` });
   } else {
-    // For other plugins, simulate a short installation delay
     setTimeout(() => {
       res.json({ success: true, message: `Successfully installed ${pluginId}.` });
     }, 2000);
   }
 });
 
-// WebSocket upgrades bypass Express middleware entirely, and the browser does
-// NOT apply CORS to WebSocket connections. Without this check any web page the
-// user visits can open ws://localhost:8789/api/pty and get an interactive
-// PowerShell session. The Origin header on a WS handshake is set by the browser
-// and cannot be forged by page script.
-const wss = new WebSocket.Server({
-  server,
-  path: '/api/pty',
-  verifyClient: ({ origin }, done) => {
-    if (isAllowedOrigin(origin)) return done(true);
-    console.error(`[PTY] Rejected WebSocket connection from origin: ${origin}`);
-    done(false, 403, 'Forbidden: Invalid Origin');
-  }
-});
+// Initialize WebSocket/PTY server, attaching to main HTTP server
+initPTY(server, isAllowedOrigin);
 
-wss.on('connection', (ws, req) => {
-  const url = new URL(req.url, `http://${req.headers.host}`);
-  const cwd = url.searchParams.get('cwd') || process.cwd();
-  
-  const shell = os.platform() === 'win32' ? 'powershell.exe' : 'bash';
-  
-  let validCwd = process.cwd();
-  if (cwd) {
-    try {
-      if (fs.existsSync(cwd)) validCwd = cwd;
-    } catch(e) {}
-  }
-
-  let ptyProcess;
-  try {
-    ptyProcess = pty.spawn(shell, [], {
-      name: 'xterm-color',
-      cols: parseInt(url.searchParams.get('cols') || '80', 10),
-      rows: parseInt(url.searchParams.get('rows') || '24', 10),
-      cwd: validCwd,
-      env: process.env
-    });
-  } catch (err) {
-    console.error('Failed to spawn PTY:', err);
-    ws.send('\\r\\nError: Failed to open terminal in the specified directory.\\r\\n');
-    ws.close();
-    return;
-  }
-  ptyProcess.onData((data) => {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(data);
-    }
-  });
-
-  ws.on('message', (msg) => {
-    // msg could be a buffer in newer ws versions, convert to string
-    ptyProcess.write(msg.toString());
-  });
-
-  ws.on('close', () => {
-    ptyProcess.kill();
-  });
-  
-  // Handle terminal resize
-  ws.on('resize', (msg) => {
-    try {
-      const { cols, rows } = JSON.parse(msg);
-      ptyProcess.resize(cols, rows);
-    } catch(e) {}
-  });
-});
-
-server.listen(PORT, '127.0.0.1', () => {
-  console.log(`Astra Backend (with PTY) running on http://127.0.0.1:${PORT}`);
+server.listen(PORT, () => {
+  console.log(`Astra Backend (with PTY) running on port ${PORT}`);
 });

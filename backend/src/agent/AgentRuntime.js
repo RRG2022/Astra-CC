@@ -1,6 +1,7 @@
-import { resolveToolCalls, anchorToolsForNextTurn, toWireToolCalls } from './toolProtocol.js';
+const { resolveToolCalls, anchorToolsForNextTurn, toWireToolCalls } = require('./toolProtocol.js');
+const crypto = require('crypto');
 
-export class AgentRuntime {
+class AgentRuntime {
   constructor(options) {
     this.options = {
       model: 'llama3.1',
@@ -13,6 +14,7 @@ export class AgentRuntime {
       onStateChange: () => {},
       onMessageUpdate: () => {},
       onTraceLog: () => {},
+      onToolExecuted: () => {},
       ...options
     };
 
@@ -84,7 +86,6 @@ export class AgentRuntime {
 
     // We implement a robust NDJSON carry buffer
     let buffer = '';
-    let toolCalls = [];
     let fullContent = '';
     let nativeToolCalls = []; // Accumulate fragments correctly
     let partialNativeCall = null;
@@ -137,9 +138,10 @@ export class AgentRuntime {
           processChunk(decoder.decode(value, { stream: true }));
         }
       } else {
-        // Fallback for tests mocking fetch with iterable response body
+        // Node 18 native fetch iteration
+        const decoder = new TextDecoder('utf-8');
         for await (const chunk of response.body) {
-          processChunk(chunk.toString());
+          processChunk(decoder.decode(chunk, { stream: true }));
         }
       }
       if (buffer.trim()) {
@@ -158,7 +160,7 @@ export class AgentRuntime {
 
     // We do NOT use the old regex scraper. We use toolProtocol.js resolveToolCalls
     const allowFallback = (this.options.model || '').toLowerCase().includes('qwen');
-    const { toolCalls: resolvedCalls, cleanedContent, usedFallback } = resolveToolCalls(nativeToolCalls, fullContent, allowFallback);
+    const { toolCalls: resolvedCalls, cleanedContent } = resolveToolCalls(nativeToolCalls, fullContent, allowFallback);
 
     traceEntry.parsedToolCalls = resolvedCalls;
     this.options.onTraceLog(traceEntry);
@@ -202,7 +204,6 @@ export class AgentRuntime {
       });
 
       this.updateState({ isExecutingTool: true });
-      let allSuccess = true;
       let actionIds = new Set();
 
       for (const call of calls) {
@@ -243,15 +244,25 @@ export class AgentRuntime {
           resultString = 'Error: You must read the file (or the relevant portion of it) using read_file before attempting to edit it. This is a strict safety invariant.';
         } else if (needsApproval) {
           this.updateState({ pendingApproval: call });
-          const approved = await this.options.requestApproval(call);
+          const approvalResult = await this.options.requestApproval(call);
           this.updateState({ pendingApproval: null });
+
+          let approved = false;
+          let finalCall = call;
+          if (typeof approvalResult === 'boolean') {
+            approved = approvalResult;
+          } else if (approvalResult && typeof approvalResult === 'object') {
+            approved = approvalResult.approved;
+            if (approvalResult.editedCall) {
+              finalCall = approvalResult.editedCall;
+            }
+          }
 
           if (!approved) {
             resultString = 'Error: User explicitly denied permission to execute this tool.';
             this.updateState({ stopReason: 'denied' });
-            allSuccess = false;
           } else {
-            resultString = await this.options.executeTool(call);
+            resultString = await this.options.executeTool(finalCall);
           }
         } else {
           resultString = await this.options.executeTool(call);
@@ -266,6 +277,11 @@ export class AgentRuntime {
             }
           } catch(e) {}
         }
+        
+        try {
+          const parsedResult = JSON.parse(resultString);
+          this.options.onToolExecuted(toolName, args, parsedResult);
+        } catch(e) {}
 
         this.options.onMessageUpdate(agentMsgIndex, {
           tool_execution_result: {
@@ -298,3 +314,5 @@ export class AgentRuntime {
     }
   }
 }
+
+module.exports = { AgentRuntime };
