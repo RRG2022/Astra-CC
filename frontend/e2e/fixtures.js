@@ -135,6 +135,8 @@ export const ev = {
   approvalRequested: (callId, name, args) => ({
     event: 'approval_requested', data: { callId, name, arguments: args }
   }),
+  tasksUpdated: (tasks) => ({ event: 'tasks_updated', data: { tasks } }),
+  subAgent: (data) => ({ event: 'sub_agent', data }),
   state: (patch) => ({ event: 'state_change', data: patch }),
   completed: (stopReason = 'complete', error = null) => ({
     event: 'loop_completed', data: { stopReason, error }

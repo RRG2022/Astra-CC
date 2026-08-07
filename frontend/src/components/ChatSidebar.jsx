@@ -3,6 +3,8 @@ import { Send, Paperclip, Mic, MicOff, Copy, Edit2, RefreshCw, AlertTriangle, Ch
 import MarkdownRenderer from './MarkdownRenderer';
 import ToolExecution from './ToolExecution';
 import ContextMeter from './ContextMeter';
+import TaskList from './TaskList';
+import SubAgentActivity from './SubAgentActivity';
 import { useWorkspaceStore } from '../lib/stores/useWorkspaceStore';
 import { useAgentStore } from '../lib/stores/useAgentStore';
 
@@ -16,6 +18,8 @@ const ChatSidebar = ({
   onDeny,
   agentError,
   contextUsage,
+  tasks,
+  subAgent,
   attachments,
   removeAttachment,
   PERSONAS,
@@ -261,6 +265,9 @@ const ChatSidebar = ({
             ))}
           </div>
         )}
+
+        <SubAgentActivity subAgent={subAgent} />
+        <TaskList tasks={tasks} />
 
         {contextUsage && (
           <div style={{ display: 'flex', justifyContent: 'flex-end', padding: '0 0.25rem 0.25rem' }}>

@@ -1,5 +1,7 @@
 const fsTools = require('./fsTools');
 const terminal = require('./terminal');
+const tasks = require('./tasks');
+const subAgent = require('./subAgent');
 const { ToolError, badRequest } = require('./errors');
 
 /**
@@ -20,7 +22,12 @@ const REGISTRY = {
   write_file:  { run: fsTools.writeFile,   mutating: true,  needsWorkspace: true },
   edit_file:   { run: fsTools.editFile,    mutating: true,  needsWorkspace: true },
   rewind_file: { run: fsTools.rewindFile,  mutating: true,  needsWorkspace: true },
-  run_command: { run: terminal.runCommand, mutating: true,  needsWorkspace: true }
+  run_command: { run: terminal.runCommand, mutating: true,  needsWorkspace: true },
+  // Bookkeeping, not an action: it changes the agent's plan, not the workspace.
+  update_tasks: { run: tasks.updateTasks,  mutating: false, needsWorkspace: false },
+  // Not mutating in itself — the child's own calls are gated one by one, with
+  // the parent's rules and the parent's approval prompt.
+  spawn_agent: { run: subAgent.spawnAgent, mutating: false, needsWorkspace: true }
 };
 
 function getTool(name) {

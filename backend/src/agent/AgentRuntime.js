@@ -83,9 +83,13 @@ class AgentRuntime {
       tools: [],
       workspacePath: '',
       sessionId: null,
+      persona: null,
+      mode: null,
       authorityLevel: 'Supervised',
       permissionRules: [],
       maxIterations: 10,
+      // Distinguishes the main loop from a sub-agent in the audit log.
+      auditAgent: null,
       streamChat,
       executeTool,
       requestApproval: async () => false,
@@ -95,6 +99,8 @@ class AgentRuntime {
       onToolExecuted: () => {},
       onContextUsage: () => {},
       onRuleAdded: () => {},
+      onTasksUpdated: () => {},
+      onSubAgentEvent: () => {},
       ...options
     };
 
@@ -112,6 +118,10 @@ class AgentRuntime {
     this.messageId = null;
     this.context = [];
     this.sessionReadFiles = new Map();
+    this.tasks = [];
+    // Sub-agents running under this turn. Cancelling has to reach them, or a
+    // cancelled turn leaves a child still reading and writing the workspace.
+    this.children = new Set();
   }
 
   updateState(updates) {
@@ -122,6 +132,35 @@ class AgentRuntime {
   cancel() {
     this.updateState({ stopReason: STOP.CANCELLED });
     if (this.abortController) this.abortController.abort();
+    for (const child of this.children) child.cancel();
+  }
+
+  /**
+   * What a sub-agent inherits — deliberately an explicit list rather than a
+   * spread of the parent's options. A child gets the parent's capabilities and
+   * nothing beyond them, so spawning can never widen what is permitted.
+   */
+  childInheritance() {
+    const o = this.options;
+    return {
+      model: o.model,
+      tools: o.tools,
+      workspacePath: o.workspacePath,
+      sessionId: o.sessionId,
+      persona: o.persona,
+      mode: o.mode,
+      authorityLevel: o.authorityLevel,
+      permissionRules: o.permissionRules,
+      streamChat: o.streamChat,
+      executeTool: o.executeTool,
+      requestApproval: o.requestApproval,
+      onSubAgentEvent: o.onSubAgentEvent,
+      adoptChild: (child) => {
+        this.children.add(child);
+        if (this.cancelled) child.cancel();
+        return () => this.children.delete(child);
+      }
+    };
   }
 
   get cancelled() {
@@ -304,8 +343,16 @@ class AgentRuntime {
       if (path) this.sessionReadFiles.set(path, parsed.contentHash);
     }
 
+    // The list replaces itself wholesale, so the last successful call is the
+    // state — there is nothing to merge.
+    if (name === 'update_tasks' && parsed?.success && Array.isArray(parsed.tasks)) {
+      this.tasks = parsed.tasks;
+      this.options.onTasksUpdated(this.tasks);
+    }
+
     auditLog.record(this.options.workspacePath, {
       sessionId: this.options.sessionId || null,
+      agent: this.options.auditAgent || null,
       callId,
       tool: name,
       args: effectiveCall.arguments || args,
@@ -336,7 +383,11 @@ class AgentRuntime {
     const result = await this.options.executeTool(
       call.name,
       call.arguments || {},
-      { workspacePath: this.options.workspacePath }
+      {
+        workspacePath: this.options.workspacePath,
+        callId: call.id,
+        agent: this.childInheritance()
+      }
     );
     return typeof result === 'string' ? result : JSON.stringify(result);
   }

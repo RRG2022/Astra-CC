@@ -40,16 +40,40 @@ function loadProjectInstructions(workspacePath) {
 }
 
 /**
+ * A sub-agent's caller sees exactly one thing: its last message. Everything it
+ * read, ran and reasoned about is discarded with its context — that is the
+ * point of spawning it. So the report has to stand on its own, and a model that
+ * signs off with "Done!" has returned nothing at all.
+ */
+const SUB_AGENT_RULES = `
+You are running as a SUB-AGENT. Another agent delegated this task to you.
+
+You cannot see its conversation and you cannot ask it anything — if the task is
+underspecified, make a reasonable assumption, act on it, and say which
+assumption you made in your report.
+
+Your final message is the ONLY thing that returns to whoever asked. Nothing else
+you do here survives. So end with a report that stands alone:
+- The answer, stated directly and first.
+- The specific evidence for it — file paths, line numbers, command output.
+- Anything you could not determine, named as such rather than guessed at.
+
+Do not address the user, do not offer follow-up work, and do not describe your
+process except where it bears on trusting the answer.`.trim();
+
+/**
  * Builds the system prompt for a session: persona, workspace, and the project's
  * own instructions. Assembled server-side so a client cannot drop the project
  * rules or widen the persona.
  */
-function buildSystemPrompt({ persona, workspacePath, mode }) {
+function buildSystemPrompt({ persona, workspacePath, mode, subAgent = false }) {
   const parts = [getPersona(persona).prompt];
 
   // Mode instructions go early: they narrow what the persona may do.
   const modePrompt = getMode(mode).prompt;
   if (modePrompt) parts.push(modePrompt);
+
+  if (subAgent) parts.push(SUB_AGENT_RULES);
 
   if (workspacePath) {
     parts.push(`Your active workspace is: ${workspacePath}`);
@@ -73,4 +97,4 @@ function buildSystemPrompt({ persona, workspacePath, mode }) {
   return { prompt: parts.join('\n\n'), projectFile: project?.source || null, mode: getMode(mode) };
 }
 
-module.exports = { buildSystemPrompt, loadProjectInstructions, PROJECT_FILES };
+module.exports = { buildSystemPrompt, loadProjectInstructions, PROJECT_FILES, SUB_AGENT_RULES };

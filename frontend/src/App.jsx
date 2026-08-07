@@ -4,7 +4,7 @@ import { useWorkspaceStore } from './lib/stores/useWorkspaceStore';
 import { useUIStore } from './lib/stores/useUIStore';
 import { useFileStore } from './lib/stores/useFileStore';
 import { useAgentStore } from './lib/stores/useAgentStore';
-import { PERSONAS, TOOLS } from './lib/constants';
+import { PERSONAS } from './lib/constants';
 import { apiFetch } from './lib/api';
 
 // Components
@@ -320,9 +320,9 @@ function App() {
     onTraceLog,
     onToolExecuted,
     model: selectedModel,
-    // Always offer the full tool set; the server probes the model's actual
-    // capabilities and drops the schemas if it can't accept them.
-    tools: TOOLS,
+    // No tool schemas are sent. The backend owns them, because it owns the
+    // registry that executes them — a second copy here is how read_file came
+    // to advertise slicing it did not do.
     workspacePath,
     authorityLevel,
     persona: selectedPersona,
@@ -497,6 +497,8 @@ function App() {
             onDeny={runtime.deny}
             agentError={runtime.error}
             contextUsage={runtime.contextUsage}
+            tasks={runtime.tasks}
+            subAgent={runtime.subAgent}
             attachments={attachments}
             removeAttachment={removeAttachment}
             PERSONAS={PERSONAS}

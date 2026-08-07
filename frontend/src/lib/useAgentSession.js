@@ -9,7 +9,11 @@ const IDLE_STATE = {
   error: null,
   currentActionId: null,
   iterationCount: 0,
-  contextUsage: null
+  contextUsage: null,
+  tasks: [],
+  // A sub-agent's transcript never reaches us by design, so this is all there
+  // is to show: which one is running and what it has touched.
+  subAgent: null
 };
 
 /**
@@ -46,7 +50,6 @@ export function useAgentSession(options) {
           workspacePath: cfg.workspacePath,
           model: cfg.model,
           authorityLevel: cfg.authorityLevel,
-          tools: cfg.tools,
           maxIterations: cfg.maxIterations,
           persona: cfg.persona,
           initialContext: context
@@ -98,6 +101,24 @@ export function useAgentSession(options) {
       callbacksRef.current.onToolExecuted?.(name, args, result);
     });
 
+    es.addEventListener('tasks_updated', (e) => {
+      setState(prev => ({ ...prev, tasks: JSON.parse(e.data).tasks || [] }));
+    });
+
+    es.addEventListener('sub_agent', (e) => {
+      const event = JSON.parse(e.data);
+      setState(prev => {
+        if (event.phase === 'started') {
+          return { ...prev, subAgent: { callId: event.callId, task: event.task, toolsUsed: [] } };
+        }
+        if (prev.subAgent?.callId !== event.callId) return prev;
+        if (event.phase === 'tool') {
+          return { ...prev, subAgent: { ...prev.subAgent, toolsUsed: [...prev.subAgent.toolsUsed, event.name] } };
+        }
+        return { ...prev, subAgent: null }; // finished
+      });
+    });
+
     es.addEventListener('loop_completed', (e) => {
       const { stopReason, error } = JSON.parse(e.data);
       setState(prev => ({
@@ -105,6 +126,7 @@ export function useAgentSession(options) {
         isStreaming: false,
         isExecutingTool: false,
         pendingApproval: null,
+        subAgent: null,
         stopReason,
         error: error || null
       }));

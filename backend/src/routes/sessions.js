@@ -108,6 +108,7 @@ router.post('/', (req, res) => {
     tools: filterToolsForMode(filterToolsForPersona(tools?.length ? tools : TOOL_SCHEMAS, persona), mode),
     maxIterations: maxIterations || 10,
     context: [{ role: 'system', content: prompt }, ...history],
+    tasks: [],
     pendingApprovals: new Map(),
     clients: new Set(),
     running: false,
@@ -138,6 +139,7 @@ router.get('/:id', (req, res) => {
     authorityLevel: session.authorityLevel,
     running: session.running,
     context: session.context,
+    tasks: session.tasks || [],
     createdAt: session.createdAt,
     updatedAt: session.updatedAt
   });
@@ -198,6 +200,9 @@ router.post('/:id/message', async (req, res) => {
       tools: session.tools,
       workspacePath: session.workspacePath,
       sessionId: session.id,
+      persona: session.persona,
+      mode: session.mode,
+      auditAgent: 'main',
       authorityLevel: session.authorityLevel,
       permissionRules: permissions.loadRules(session.workspacePath),
       maxIterations: session.maxIterations,
@@ -226,9 +231,20 @@ router.post('/:id/message', async (req, res) => {
       onToolExecuted: (name, args, result, callId) =>
         emit(session, 'tool_executed', { callId, name, args, result }),
       onContextUsage: (usage) => emit(session, 'context_usage', usage),
-      onRuleAdded: (rule) => emit(session, 'rule_added', rule)
+      onRuleAdded: (rule) => emit(session, 'rule_added', rule),
+      onTasksUpdated: (tasks) => {
+        session.tasks = tasks;
+        emit(session, 'tasks_updated', { tasks });
+      },
+      // A sub-agent's transcript is deliberately not the parent's, so this is
+      // all the UI ever learns about one: that it started, what it touched,
+      // and how it ended.
+      onSubAgentEvent: (event) => emit(session, 'sub_agent', event)
     });
   }
+
+  // A mode switch mid-session changes what a child may inherit.
+  session.runtime.options.mode = session.mode;
 
   // Attach tool schemas only if this model can actually accept them.
   // session.tools is already filtered by persona and mode; this only decides

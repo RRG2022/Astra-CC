@@ -7,9 +7,10 @@ const { buildSystemPrompt, loadProjectInstructions } = require('./systemPrompt')
 const { filterToolsForPersona, getPersona } = require('./personas');
 const { createWorkspace } = require('../../test/helpers');
 
-const tool = (name) => ({ type: 'function', function: { name, description: '', parameters: {} } });
-const ALL_TOOLS = ['read_file', 'edit_file', 'write_file', 'run_command', 'list_dir', 'grep_search']
-  .map(tool);
+// Taken from the canonical schemas rather than restated here: a hardcoded copy
+// silently stops covering whatever gets added next.
+const { TOOL_SCHEMAS } = require('../tools/schemas');
+const ALL_TOOLS = TOOL_SCHEMAS;
 
 test('loads AGENTS.md from the workspace root', () => {
   const ws = createWorkspace();

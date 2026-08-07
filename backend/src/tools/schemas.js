@@ -111,6 +111,75 @@ const TOOL_SCHEMAS = [
         required: ['query']
       }
     }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'update_tasks',
+      description:
+        'Record your plan for a multi-step job and keep it current: mark a task '
+        + 'in_progress before starting it and completed the moment it is done. '
+        + 'Send the entire list every time — it replaces the previous one, so the '
+        + 'list you send is the list the user sees. At most one task may be '
+        + 'in_progress. Skip this for work that is a single step.',
+      parameters: {
+        type: 'object',
+        properties: {
+          tasks: {
+            type: 'array',
+            description: 'The complete task list, in order',
+            items: {
+              type: 'object',
+              properties: {
+                id: { type: 'string', description: 'Stable identifier, kept across updates' },
+                task: { type: 'string', description: 'What will be done, in a few words' },
+                status: {
+                  type: 'string',
+                  enum: ['pending', 'in_progress', 'completed'],
+                  description: 'Where this task stands'
+                }
+              },
+              required: ['task', 'status']
+            }
+          }
+        },
+        required: ['tasks']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'spawn_agent',
+      description:
+        'Delegate a self-contained piece of work to a sub-agent that has its own '
+        + 'context. Use it when answering something would take many tool calls whose '
+        + 'details you do not need — surveying a large codebase, tracking down where '
+        + 'a behaviour lives — so your own context holds the answer rather than the '
+        + 'search. The sub-agent cannot see this conversation and cannot ask you '
+        + 'anything: put everything it needs in the task, and expect only its final '
+        + 'report back. It has your tools or fewer, never more, and cannot spawn '
+        + 'agents of its own.',
+      parameters: {
+        type: 'object',
+        properties: {
+          task: {
+            type: 'string',
+            description:
+              'The complete instruction, including any context and what the report '
+              + 'must contain to be useful to you'
+          },
+          tools: {
+            type: 'array',
+            items: { type: 'string' },
+            description:
+              'Optional: restrict the sub-agent to these tools. Defaults to yours '
+              + 'apart from spawn_agent.'
+          }
+        },
+        required: ['task']
+      }
+    }
   }
 ];
 

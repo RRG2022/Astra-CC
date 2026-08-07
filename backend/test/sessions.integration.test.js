@@ -817,6 +817,200 @@ test('a second concurrent turn is rejected rather than racing', async () => {
   sse.close();
 });
 
+// --- sub-agents and the task list ----------------------------------------
+
+/** A session offering the backend's real schemas, which include the new tools. */
+async function startFullSession(ws, overrides = {}) {
+  const { body } = await api('/api/sessions', {
+    body: { workspacePath: ws, model: 'test-model', maxIterations: 6, ...overrides }
+  });
+  const sse = await openSse(`${baseUrl}/api/sessions/${body.sessionId}/stream?token=${TOKEN}`);
+  openStreams.push(sse);
+  return { sessionId: body.sessionId, sse, body };
+}
+
+test('a sub-agent runs in its own context and returns only its report', async () => {
+  const ws = createWorkspace();
+  fs.writeFileSync(path.join(ws, 'alpha.txt'), 'a');
+
+  fake.push([toolCallChunk('spawn_agent', { task: 'Count the files here and report the number.' })]);
+  fake.push([toolCallChunk('list_dir', { directoryPath: '.' })]);   // the child
+  fake.push(textChunks('There is 1 file: alpha.txt.'));             // the child's report
+  fake.push(textChunks('The sub-agent found 1 file.'));             // back in the parent
+
+  const { sessionId, sse } = await startFullSession(ws);
+  await send(sessionId, 'how many files are here?');
+
+  const done = await sse.waitFor('loop_completed', { label: 'loop_completed' });
+  assert.equal(done.data.stopReason, 'complete');
+  assert.equal(fake.requests.length, 4, 'parent, child, child, parent');
+
+  // The child was told what it is, and got its own conversation.
+  assert.match(fake.requests[1].messages[0].content, /SUB-AGENT/);
+  assert.equal(fake.requests[1].messages[1].content, 'Count the files here and report the number.');
+
+  // The whole point: the parent pays for the answer, not the search. Its
+  // second turn carries the report and no trace of the child's tool calls.
+  const parentTurn = fake.requests[3].messages;
+  const spawnResult = parentTurn.find(m => m.role === 'tool' && m.name === 'spawn_agent');
+  assert.match(spawnResult.content, /There is 1 file/);
+  assert.ok(
+    !parentTurn.some(m => m.name === 'list_dir'),
+    "the child's tool results must never enter the parent's context"
+  );
+
+  const result = JSON.parse(spawnResult.content);
+  assert.equal(result.success, true);
+  assert.deepEqual(result.toolsUsed, ['list_dir']);
+
+  sse.close();
+});
+
+test('a sub-agent that stops early is not reported as an answer', async () => {
+  const ws = createWorkspace();
+
+  fake.push([toolCallChunk('spawn_agent', { task: 'Look at everything, forever.' })]);
+  // The child never stops calling tools and hits its own iteration cap.
+  for (let i = 0; i < 12; i++) fake.push([toolCallChunk('list_dir', { directoryPath: '.' })]);
+  fake.push(textChunks('The sub-agent did not finish.'));
+
+  const { sessionId, sse } = await startFullSession(ws);
+  await send(sessionId, 'survey the repo');
+  await sse.waitFor('loop_completed', { label: 'loop_completed' });
+
+  const parentTurn = fake.requests[fake.requests.length - 1].messages;
+  const result = JSON.parse(parentTurn.find(m => m.name === 'spawn_agent').content);
+
+  assert.equal(result.success, false, 'a capped child has findings, not an answer');
+  assert.equal(result.stopReason, 'max_iterations');
+  assert.match(result.error, /stopped early/);
+
+  sse.close();
+});
+
+test('a permission rule reaches inside a sub-agent', async () => {
+  const ws = createWorkspace();
+  fs.mkdirSync(path.join(ws, '.astra'), { recursive: true });
+  fs.writeFileSync(path.join(ws, '.astra', 'permissions.json'), JSON.stringify({
+    rules: [{ effect: 'deny', tool: 'run_command', pattern: 'rm *' }]
+  }));
+
+  fake.push([toolCallChunk('spawn_agent', { task: 'Delete the build directory.' })]);
+  fake.push([toolCallChunk('run_command', { command: 'rm -rf build', reason: 'clean' })]);
+  fake.push(textChunks('I could not: that command is blocked by a rule.'));
+  fake.push(textChunks('It is blocked.'));
+
+  const { sessionId, sse } = await startFullSession(ws, { authorityLevel: 'Autonomous' });
+  await send(sessionId, 'clean the build');
+  await sse.waitFor('loop_completed', { label: 'loop_completed' });
+
+  // The child saw the rule, not a free pass.
+  const childTurn = fake.requests[2].messages;
+  assert.match(childTurn.find(m => m.role === 'tool').content, /permission rule forbids/);
+
+  // And the audit log says which agent made the call.
+  const lines = fs.readFileSync(path.join(ws, '.astra', 'audit.jsonl'), 'utf8')
+    .split('\n').filter(Boolean).map(JSON.parse);
+  const blocked = lines.find(l => l.tool === 'run_command');
+  assert.equal(blocked.outcome, 'denied-by-rule');
+  assert.match(blocked.agent, /^sub:/, 'a sub-agent call is attributable to the sub-agent');
+  assert.equal(lines.find(l => l.tool === 'spawn_agent').agent, 'main');
+
+  sse.close();
+});
+
+test('a plan-mode parent cannot spawn a child that writes', async () => {
+  const ws = createWorkspace();
+
+  // The escalation attempt: ask for a tool the parent does not currently hold.
+  fake.push([toolCallChunk('spawn_agent', { task: 'Write config.json.', tools: ['write_file'] })]);
+  fake.push(textChunks('I cannot write while planning.'));
+
+  const { sessionId, sse } = await startFullSession(ws, { mode: 'plan' });
+  await send(sessionId, 'change the config');
+  await sse.waitFor('loop_completed', { label: 'loop_completed' });
+
+  const result = JSON.parse(fake.requests[1].messages.find(m => m.name === 'spawn_agent').content);
+  assert.equal(result.success, false);
+  assert.match(result.error, /tools you do not have yourself: write_file/);
+  assert.equal(fs.existsSync(path.join(ws, 'config.json')), false);
+
+  sse.close();
+});
+
+test('cancelling a turn stops the sub-agent too', async () => {
+  const ws = createWorkspace();
+
+  fake.push([toolCallChunk('spawn_agent', { task: 'Create never.txt.' })]);
+  fake.push([toolCallChunk('write_file', { filePath: 'never.txt', content: 'x' })]);
+
+  const { sessionId, sse } = await startFullSession(ws);
+  await send(sessionId, 'create a file');
+
+  // The approval is the child's, but it reaches the user through the parent.
+  const ask = await sse.waitFor('approval_requested', { label: 'approval_requested' });
+  assert.equal(ask.data.name, 'write_file');
+
+  await api(`/api/sessions/${sessionId}/cancel`, { body: {} });
+
+  const done = await sse.waitFor('loop_completed', { label: 'loop_completed' });
+  assert.ok(['cancelled', 'denied'].includes(done.data.stopReason), done.data.stopReason);
+  assert.equal(fs.existsSync(path.join(ws, 'never.txt')), false, 'the child must not still be writing');
+
+  sse.close();
+});
+
+test('the task list is broadcast and survives the turn', async () => {
+  const ws = createWorkspace();
+
+  fake.push([toolCallChunk('update_tasks', {
+    tasks: [
+      { id: '1', task: 'Read the config', status: 'completed' },
+      { id: '2', task: 'Change the port', status: 'in_progress' },
+      { id: '3', task: 'Run the tests', status: 'pending' }
+    ]
+  })]);
+  fake.push(textChunks('Working through it.'));
+
+  const { sessionId, sse } = await startFullSession(ws);
+  await send(sessionId, 'change the port and verify');
+  await sse.waitFor('loop_completed', { label: 'loop_completed' });
+
+  const updates = sse.of('tasks_updated');
+  assert.equal(updates.length, 1);
+  assert.deepEqual(updates[0].data.tasks.map(t => t.status), ['completed', 'in_progress', 'pending']);
+
+  // Persisted, so reopening the session shows the same plan.
+  const resumed = await api(`/api/sessions/${sessionId}?workspacePath=${encodeURIComponent(ws)}`, {
+    method: 'GET'
+  });
+  assert.deepEqual(resumed.body.tasks.map(t => t.task), ['Read the config', 'Change the port', 'Run the tests']);
+
+  sse.close();
+});
+
+test('a rejected task list is a repairable error, not a dead turn', async () => {
+  const ws = createWorkspace();
+
+  fake.push([toolCallChunk('update_tasks', {
+    tasks: [{ task: 'One', status: 'in_progress' }, { task: 'Two', status: 'in_progress' }]
+  })]);
+  fake.push(textChunks('Fixed the list.'));
+
+  const { sessionId, sse } = await startFullSession(ws);
+  await send(sessionId, 'plan it');
+  const done = await sse.waitFor('loop_completed', { label: 'loop_completed' });
+
+  assert.equal(done.data.stopReason, 'complete');
+  assert.equal(sse.of('tasks_updated').length, 0, 'an invalid list must not be broadcast');
+  assert.match(
+    fake.requests[1].messages.find(m => m.role === 'tool').content,
+    /Exactly one task may be in progress/
+  );
+
+  sse.close();
+});
+
 test('an edited call is executed in place of the original', async () => {
   const ws = createWorkspace();
   fake.push([toolCallChunk('write_file', { filePath: 'edited.txt', content: 'original' })]);

@@ -33,6 +33,7 @@ function toRecord(session) {
     maxIterations: session.maxIterations,
     tools: session.tools,
     context: session.context,
+    tasks: session.tasks || [],
     createdAt: session.createdAt,
     updatedAt: Date.now()
   };
