@@ -1,4 +1,6 @@
-const { resolveToolCalls, anchorToolsForNextTurn, toWireToolCalls } = require('./toolProtocol.js');
+const {
+  resolveToolCalls, anchorToolsForNextTurn, toWireToolCalls, textCallCorrection, callKey
+} = require('./toolProtocol.js');
 const { streamChat, getContextWindow } = require('../llm/chat.js');
 const { executeTool, isMutating, needsWorkspace } = require('../tools');
 const { compactContext, usageSnapshot } = require('./compaction.js');
@@ -25,6 +27,11 @@ const STOP = {
   MAX_ITERATIONS: 'max_iterations',
   ERROR: 'error'
 };
+
+// How many times in one turn the model is told that a tool call it wrote as
+// text was not run. Enough to recover from the habit; not so many that a model
+// which keeps doing it burns the whole iteration budget on being corrected.
+const MAX_TEXT_CALL_CORRECTIONS = parseInt(process.env.ASTRA_MAX_TEXT_CALL_CORRECTIONS || '2', 10);
 
 // A single unbounded tool result can evict the task from the context window.
 // The UI still receives the full result; only the model's copy is capped.
@@ -119,6 +126,9 @@ class AgentRuntime {
     this.context = [];
     this.sessionReadFiles = new Map();
     this.tasks = [];
+    // Text-shaped calls refused last turn. If the model writes one of these
+    // again after being told, that is its answer and the call runs.
+    this.awaitingConfirmation = new Set();
     // Sub-agents running under this turn. Cancelling has to reach them, or a
     // cancelled turn leaves a child still reading and writing the workspace.
     this.children = new Set();
@@ -228,7 +238,9 @@ class AgentRuntime {
     // Text-shaped calls are only trusted when the model was never shown any
     // schemas — otherwise a native call is the only legitimate channel.
     const allowFallback = !(this.options.tools || []).length;
-    const { toolCalls, cleanedContent } = resolveToolCalls(nativeToolCalls, fullContent, allowFallback);
+    const { toolCalls, refusedCalls, cleanedContent } = resolveToolCalls(
+      nativeToolCalls, fullContent, allowFallback, { confirmed: this.awaitingConfirmation }
+    );
 
     trace.content = fullContent;
     trace.parsedToolCalls = toolCalls;
@@ -238,7 +250,7 @@ class AgentRuntime {
       this.options.onMessageUpdate(this.messageId, { content_replace: cleanedContent });
     }
 
-    return { toolCalls, content: cleanedContent };
+    return { toolCalls, refusedCalls, content: cleanedContent };
   }
 
   /**
@@ -434,12 +446,18 @@ class AgentRuntime {
     this.context = [...initialContext];
     this.updateState({ stopReason: null, error: null, iterationCount: 0 });
 
+    let corrections = 0;
+    this.awaitingConfirmation = new Set();
+
     while (this.state.iterationCount < this.options.maxIterations) {
       if (this.cancelled) break;
       this.updateState({ iterationCount: this.state.iterationCount + 1 });
 
       await this.budgetContext();
       const turn = await this.stream(this.context);
+      // Consumed: a confirmation only ever covers the turn straight after the
+      // correction that asked for it.
+      this.awaitingConfirmation = new Set();
       if (!turn) return this.state.stopReason; // stream() already set an honest reason
 
       if (this.cancelled) break;
@@ -451,6 +469,28 @@ class AgentRuntime {
         if (turn.content) {
           this.context.push({ role: 'assistant', content: turn.content });
         }
+
+        // The model announced an action and wrote the call as text, so the
+        // guard declined it. Ending here would report a turn as finished with
+        // the announced work never done — tell it instead, and let it either
+        // make the call properly or say it was only illustrating.
+        if (turn.refusedCalls?.length && corrections < MAX_TEXT_CALL_CORRECTIONS) {
+          corrections++;
+          this.awaitingConfirmation = new Set(turn.refusedCalls.map(callKey));
+          this.context.push({
+            role: 'user',
+            content: textCallCorrection(turn.refusedCalls),
+            _synthetic: true
+          });
+          this.options.onTraceLog({
+            timestamp: Date.now(),
+            type: 'text_call_correction',
+            attempt: corrections,
+            calls: turn.refusedCalls.map(c => c.name)
+          });
+          continue;
+        }
+
         this.updateState({ stopReason: STOP.COMPLETE });
         return this.state.stopReason;
       }

@@ -6,6 +6,8 @@ const {
   extractToolCallsFromText,
   resolveToolCalls,
   anchorToolsForNextTurn,
+  textCallCorrection,
+  callKey,
   CONTINUATION_MESSAGE
 } = require('./toolProtocol.js');
 
@@ -210,6 +212,70 @@ test('a fenced call beside a fenced blob of data stays gated', () => {
     + '```json\n{"version":"1.0.0","private":true}\n```';
 
   assert.equal(resolveToolCalls([], content, false).toolCalls.length, 0);
+});
+
+test('a refused call is reported back, not just dropped', () => {
+  // The loop needs to know a call was declined: a turn that ends holding one
+  // has announced work it never did.
+  const content = 'Now, I will write the summary.\n\n'
+    + '```json\n{"name":"write_file","arguments":{"filePath":"a.md","content":"x"}}\n```';
+  const { toolCalls, refusedCalls } = resolveToolCalls([], content, false);
+
+  assert.equal(toolCalls.length, 0);
+  assert.deepEqual(refusedCalls.map(c => c.name), ['write_file']);
+});
+
+test('a call that runs is not also reported as refused', () => {
+  const { toolCalls, refusedCalls } = resolveToolCalls(
+    [], '```json\n{"name":"list_dir","arguments":{"directoryPath":"."}}\n```', false
+  );
+
+  assert.deepEqual(toolCalls.map(c => c.name), ['list_dir']);
+  assert.equal(refusedCalls.length, 0);
+});
+
+test('the correction names the tool and offers both ways out', () => {
+  const message = textCallCorrection([{ name: 'write_file' }, { name: 'write_file' }]);
+
+  assert.match(message, /write_file/);
+  assert.doesNotMatch(message, /write_file, write_file/, 'names are deduplicated');
+  assert.match(message, /was not run/);
+  assert.match(message, /same call again/, 'the model needs a path it can actually follow');
+  assert.match(message, /only showing an example/);
+});
+
+test('a refused call written again after the correction is run', () => {
+  // The guard cannot tell asking from illustrating, which is why it declines.
+  // Being asked and answering is what resolves it: a model that repeats the
+  // call after being told it did not run has said which one it meant.
+  const content = 'I will proceed with the write_file tool.\n\n'
+    + '```json\n{"name":"write_file","arguments":{"filePath":"a.md","content":"x"}}\n```';
+
+  const first = resolveToolCalls([], content, false);
+  assert.equal(first.toolCalls.length, 0, 'not on sight');
+
+  const confirmed = new Set(first.refusedCalls.map(callKey));
+  const second = resolveToolCalls([], content, false, { confirmed });
+
+  assert.deepEqual(second.toolCalls.map(c => c.name), ['write_file']);
+  assert.equal(second.cleanedContent, 'I will proceed with the write_file tool.');
+});
+
+test('confirmation covers that one call, not fenced calls in general', () => {
+  // Otherwise one nudge would unlock every text call for the rest of the turn.
+  const confirmed = new Set(['write_file::{"filePath":"a.md","content":"x"}']);
+  const other = 'Here is what that would look like.\n\n'
+    + '```json\n{"name":"run_command","arguments":{"command":"rm -rf /"}}\n```';
+
+  assert.equal(resolveToolCalls([], other, false, { confirmed }).toolCalls.length, 0);
+});
+
+test('confirmation keys on the arguments too, not just the tool name', () => {
+  const confirmed = new Set(['write_file::{"filePath":"a.md","content":"x"}']);
+  const different = 'Proceeding.\n\n'
+    + '```json\n{"name":"write_file","arguments":{"filePath":"passwd","content":"pwned"}}\n```';
+
+  assert.equal(resolveToolCalls([], different, false, { confirmed }).toolCalls.length, 0);
 });
 
 test('a refused fenced call stays in the reply instead of vanishing', () => {

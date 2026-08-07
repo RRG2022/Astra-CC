@@ -817,6 +817,126 @@ test('a second concurrent turn is rejected rather than racing', async () => {
   sse.close();
 });
 
+test('a tool call written as prose-plus-JSON is corrected, not silently dropped', async () => {
+  const ws = createWorkspace();
+
+  // qwen2.5-coder's habit: announce the action, then fence the call. The guard
+  // is right not to run it, but ending the turn there meant the model said it
+  // was writing a file, nothing happened, and stopReason was complete.
+  fake.push(textChunks(
+    'Now, I will write this summary to a file called summary.md.\n\n'
+    + '```json\n{"name": "write_file", "arguments": {"filePath": "summary.md", "content": "all done"}}\n```'
+  ));
+  fake.push([toolCallChunk('write_file', { filePath: 'summary.md', content: 'all done' })]);
+  fake.push(textChunks('Written.'));
+
+  const { sessionId, sse } = await startSession(ws, { authorityLevel: 'Autonomous' });
+  await send(sessionId, 'summarise this folder');
+
+  const done = await sse.waitFor('loop_completed', { label: 'loop_completed' });
+  assert.equal(done.data.stopReason, 'complete');
+
+  // The correction went back to the model, and it re-issued the call properly.
+  const secondTurn = fake.requests[1].messages;
+  const nudge = secondTurn[secondTurn.length - 1];
+  assert.equal(nudge.role, 'user');
+  assert.match(nudge.content, /was not run/);
+  assert.match(nudge.content, /write_file/);
+
+  // Which is the whole point: the announced file actually exists.
+  assert.equal(fs.readFileSync(path.join(ws, 'summary.md'), 'utf8'), 'all done');
+
+  sse.close();
+});
+
+test('a model that was only illustrating a call is left alone', async () => {
+  const ws = createWorkspace();
+
+  fake.push(textChunks(
+    'To read a file you would call:\n\n'
+    + '```json\n{"name": "read_file", "arguments": {"filePath": "a.txt"}}\n```'
+  ));
+  // Told it was not run, the model clarifies rather than calling anything.
+  fake.push(textChunks('That was only an example — I did not run it.'));
+
+  const { sessionId, sse } = await startSession(ws);
+  await send(sessionId, 'how would I read a file?');
+
+  const done = await sse.waitFor('loop_completed', { label: 'loop_completed' });
+  assert.equal(done.data.stopReason, 'complete');
+  assert.equal(sse.of('tool_executed').length, 0, 'an illustration must never execute');
+
+  sse.close();
+});
+
+test('a model that only ever writes fenced calls still gets its work done', async () => {
+  const ws = createWorkspace();
+
+  // Live qwen2.5-coder behaviour: it never makes a native call. Told the call
+  // was not run, it answers "I will proceed with the write_file tool" and
+  // writes the identical fence again — which is it confirming what it meant.
+  const announce = 'Now, I will write the overview.\n\n'
+    + '```json\n{"name": "write_file", "arguments": {"filePath": "overview.md", "content": "done"}}\n```';
+  fake.push(textChunks(announce));
+  fake.push(textChunks('I apologize for the confusion. I will proceed with the write_file tool.\n\n'
+    + '```json\n{"name": "write_file", "arguments": {"filePath": "overview.md", "content": "done"}}\n```'));
+  fake.push(textChunks('Written.'));
+
+  const { sessionId, sse } = await startSession(ws, { authorityLevel: 'Autonomous' });
+  await send(sessionId, 'write an overview');
+
+  const done = await sse.waitFor('loop_completed', { label: 'loop_completed' });
+  assert.equal(done.data.stopReason, 'complete');
+  assert.equal(fs.readFileSync(path.join(ws, 'overview.md'), 'utf8'), 'done');
+
+  sse.close();
+});
+
+test('a confirmed call is still subject to approval', async () => {
+  const ws = createWorkspace();
+
+  // Confirmation resolves "did you mean it", not "may you". Under Supervised
+  // the user is still the one who decides.
+  const announce = 'I will write it.\n\n'
+    + '```json\n{"name": "write_file", "arguments": {"filePath": "nope.txt", "content": "x"}}\n```';
+  fake.push(textChunks(announce));
+  fake.push(textChunks(announce));
+
+  const { sessionId, sse } = await startSession(ws); // Supervised
+  await send(sessionId, 'write a file');
+
+  const ask = await sse.waitFor('approval_requested', { label: 'approval_requested' });
+  assert.equal(ask.data.name, 'write_file');
+  await api(`/api/sessions/${sessionId}/approve/${ask.data.callId}`, { body: { approved: false } });
+
+  const done = await sse.waitFor('loop_completed', { label: 'loop_completed' });
+  assert.equal(done.data.stopReason, 'denied');
+  assert.equal(fs.existsSync(path.join(ws, 'nope.txt')), false);
+
+  sse.close();
+});
+
+test('a different call after a correction is not run on sight', async () => {
+  const ws = createWorkspace();
+
+  // One nudge must not unlock text calls generally — otherwise a model that
+  // gets corrected once can execute anything it writes for the rest of the turn.
+  fake.push(textChunks('I will read it.\n\n'
+    + '```json\n{"name": "read_file", "arguments": {"filePath": "readme.txt"}}\n```'));
+  fake.push(textChunks('Actually, let me clean up first.\n\n'
+    + '```json\n{"name": "run_command", "arguments": {"command": "rm -rf .", "reason": "clean"}}\n```'));
+  fake.push(textChunks('Never mind.'));
+
+  const { sessionId, sse } = await startSession(ws, { authorityLevel: 'Autonomous' });
+  await send(sessionId, 'read the readme');
+
+  const done = await sse.waitFor('loop_completed', { label: 'loop_completed' });
+  assert.equal(done.data.stopReason, 'complete');
+  assert.equal(sse.of('tool_executed').length, 0, 'a substituted call must not inherit the confirmation');
+
+  sse.close();
+});
+
 // --- sub-agents and the task list ----------------------------------------
 
 /** A session offering the backend's real schemas, which include the new tools. */

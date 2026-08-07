@@ -139,7 +139,8 @@ function extractToolCallsFromText(content) {
  * the approval key, the UI card, the tool_call_id in context, and the audit
  * log — minting it in one place is what keeps those four in agreement.
  */
-function resolveToolCalls(nativeToolCalls, content, allowFallback = false, mintId = defaultMintId) {
+function resolveToolCalls(nativeToolCalls, content, allowFallback = false, options = {}) {
+  const { mintId = defaultMintId, confirmed = null } = options;
   const seen = new Set();
   const toolCalls = [];
 
@@ -162,7 +163,14 @@ function resolveToolCalls(nativeToolCalls, content, allowFallback = false, mintI
       // A whole-message call is unambiguous and always honoured. A fenced one
       // may be documentation, so it needs the model to have had no other way
       // to ask — otherwise explaining a call could re-run it.
-      if (call.source === 'fence' && !allowFallback) continue;
+      //
+      // Unless it has already been asked. A call refused last turn and then
+      // written again, after being told it did not run, is the model answering
+      // the question the guard could not: it meant it. Nothing else is
+      // relaxed — authority level, permission rules and the approval prompt
+      // all still stand between this and anything actually happening.
+      const confirmedNow = confirmed && confirmed.has(callKey(call));
+      if (call.source === 'fence' && !allowFallback && !confirmedNow) continue;
 
       const key = callKey(call);
       if (seen.has(key)) continue;
@@ -186,8 +194,15 @@ function resolveToolCalls(nativeToolCalls, content, allowFallback = false, mintI
     cleanedContent = cleanedContent.trim();
   }
 
+  // Calls the guard declined. The loop needs these: a turn that ends holding
+  // one has announced an action it never took, and reporting that as a
+  // finished turn is the failure this codebase exists to avoid.
+  const running = new Set(toolCalls.map(callKey));
+  const refusedCalls = calls.filter(c => !running.has(callKey(c)));
+
   return {
     toolCalls,
+    refusedCalls,
     cleanedContent,
     usedFallback: allowFallback && nativeCount === 0 && toolCalls.length > 0
   };
@@ -211,6 +226,25 @@ function anchorToolsForNextTurn(context) {
   return [...context, { role: 'user', content: CONTINUATION_MESSAGE, _synthetic: true }];
 }
 
+/**
+ * Sent when a turn ends holding a tool call the guard declined.
+ *
+ * The guard cannot tell a model asking for a tool from a model illustrating
+ * one, which is exactly why the call is not executed. Asking is how that gets
+ * resolved: the model either issues the call properly or says it was only
+ * showing an example. Either way the turn stops ending in a silent no-op.
+ */
+function textCallCorrection(refusedCalls) {
+  const names = [...new Set(refusedCalls.map(c => c.name))].join(', ');
+  return `You wrote what looks like a tool call (${names}) as text in your reply, `
+    + 'so it was not run — a call written inside an explanation cannot be told apart '
+    + 'from one you are only illustrating.\n\n'
+    + 'If you meant to run it: make the call properly using the tool interface, or '
+    + 'send exactly the same call again and it will be run this time.\n\n'
+    + 'If you were only showing an example: say so plainly and carry on, and do not '
+    + 'repeat it.';
+}
+
 module.exports = {
   defaultMintId,
   scanJsonObjects,
@@ -219,6 +253,7 @@ module.exports = {
   extractToolCallsFromText,
   resolveToolCalls,
   toWireToolCalls,
+  textCallCorrection,
   CONTINUATION_MESSAGE,
   anchorToolsForNextTurn
 };
