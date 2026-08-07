@@ -156,11 +156,24 @@ test('a fenced call is ignored when the model had real schemas', () => {
   assert.equal(toolCalls.length, 0);
 });
 
-test('a fenced call is honoured only when the model had no schemas at all', () => {
+test('a message that is only a fenced call is honoured, schemas or not', () => {
+  // Observed live from qwen2.5-coder: it wraps the call in a ```json fence
+  // with nothing else in the message. Discarding that made the turn complete
+  // having run nothing at all.
   const content = '```json\n{"name":"list_dir","arguments":{"directoryPath":"."}}\n```';
 
   assert.equal(resolveToolCalls([], content, true).toolCalls.length, 1);
+  assert.equal(resolveToolCalls([], content, false).toolCalls.length, 1);
+  assert.equal(resolveToolCalls([], content, false).cleanedContent, '');
+});
+
+test('a fenced call surrounded by prose stays gated behind allowFallback', () => {
+  // The dangerous shape: the model explaining what it did. Honouring this is
+  // what turned an explanation into a second execution.
+  const content = 'I ran this for you:\n\n```json\n{"name":"run_command","arguments":{"command":"ls"}}\n```\n\nThat listed the directory.';
+
   assert.equal(resolveToolCalls([], content, false).toolCalls.length, 0);
+  assert.equal(resolveToolCalls([], content, true).toolCalls.length, 1);
 });
 
 test('a tool call quoted inside prose is still never executed', () => {

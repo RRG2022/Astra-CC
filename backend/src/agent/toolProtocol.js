@@ -63,13 +63,16 @@ const FENCE_RE = /```(?:json|tool_call|tool)?[ \t]*\r?\n([\s\S]*?)\r?\n[ \t]*```
  *
  * Two sources, with very different trust levels:
  *
- *   'whole' — the entire message is nothing but tool-call JSON. There is no
- *     prose to confuse it with, so this is unambiguous intent and is always
- *     safe to honour.
- *   'fence' — a fenced block inside a larger message. This is also how a model
- *     *documents* a call when explaining itself, so honouring it can turn an
- *     explanation into an action. Only trusted when the model was never given
- *     real schemas and has no other way to ask.
+ *   'whole' — the message is nothing but the call, whether bare JSON or a
+ *     single fenced block. There is no surrounding prose for it to be
+ *     documenting, so this is unambiguous intent and is always honoured.
+ *     Several local models (qwen2.5-coder via Ollama among them) ask this way
+ *     even when given real schemas; discarding it made the turn silently
+ *     do nothing.
+ *   'fence' — a fenced block inside a larger message. This is how a model
+ *     *documents* a call while explaining itself, so honouring it can turn an
+ *     explanation into an action — the original prose-execution bug. Only
+ *     trusted when the model was given no schemas and has no other way to ask.
  */
 function extractToolCallsFromText(content) {
   const calls = [];
@@ -100,7 +103,13 @@ function extractToolCallsFromText(content) {
   while ((match = FENCE_RE.exec(text)) !== null) {
     const inner = match[1].trim();
     if (!inner.startsWith('{') || !inner.endsWith('}')) continue;
-    consider(scanJsonObjects(inner), match[0], 'fence');
+
+    // A message that is *nothing but* one fenced call is the model asking for
+    // the tool — there is no surrounding explanation for it to be documenting.
+    // A fence embedded in prose is the dangerous case: that is how a model
+    // shows what it ran while explaining itself.
+    const isEntireMessage = match[0].trim() === text;
+    consider(scanJsonObjects(inner), match[0], isEntireMessage ? 'whole' : 'fence');
   }
 
   return { calls, spans };
