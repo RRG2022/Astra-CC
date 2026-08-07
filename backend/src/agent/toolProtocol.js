@@ -77,8 +77,11 @@ const FENCE_RE = /```(?:json|tool_call|tool)?[ \t]*\r?\n([\s\S]*?)\r?\n[ \t]*```
 function extractToolCallsFromText(content) {
   const calls = [];
   const spans = [];
+  // Each span paired with the calls it contains, so the caller can tell which
+  // stretch of text belongs to which call.
+  const blocks = [];
   const text = (content || '').trim();
-  if (!text) return { calls, spans };
+  if (!text) return { calls, spans, blocks };
 
   const consider = (objects, sourceSpan, source) => {
     const normalized = objects.map(o => normalizeCall(o.value)).filter(Boolean);
@@ -86,6 +89,7 @@ function extractToolCallsFromText(content) {
     for (const call of normalized) call.source = source;
     calls.push(...normalized);
     spans.push(sourceSpan);
+    blocks.push({ span: sourceSpan, calls: normalized });
     return true;
   };
 
@@ -94,7 +98,7 @@ function extractToolCallsFromText(content) {
     const covered = objects.reduce((n, o) => n + o.raw.length, 0);
     const gap = text.replace(/\s+/g, '').length - objects.reduce((n, o) => n + o.raw.replace(/\s+/g, '').length, 0);
     if (objects.length && covered > 0 && gap === 0 && consider(objects, text, 'whole')) {
-      return { calls, spans };
+      return { calls, spans, blocks };
     }
   }
 
@@ -112,7 +116,7 @@ function extractToolCallsFromText(content) {
     consider(scanJsonObjects(inner), match[0], isEntireMessage ? 'whole' : 'fence');
   }
 
-  return { calls, spans };
+  return { calls, spans, blocks };
 }
 
 /**
@@ -135,7 +139,7 @@ function resolveToolCalls(nativeToolCalls, content, allowFallback = false, mintI
   }
 
   const nativeCount = toolCalls.length;
-  const { calls, spans } = extractToolCallsFromText(content);
+  const { calls, blocks } = extractToolCallsFromText(content);
 
   // A native call always wins; text is only consulted when there wasn't one.
   if (nativeCount === 0) {
@@ -153,9 +157,17 @@ function resolveToolCalls(nativeToolCalls, content, allowFallback = false, mintI
     }
   }
 
+  // Protocol JSON is hidden from the reply only when the call it describes is
+  // actually going to run — the tool card then shows it instead. A refused call
+  // (a fenced one the guard above declined) must stay visible: deleting it left
+  // the model announcing an action, no card, no file, and stopReason complete.
   let cleanedContent = content || '';
-  if (calls.length) {
-    for (const span of spans) cleanedContent = cleanedContent.replace(span, '');
+  if (blocks.length) {
+    const running = new Set(toolCalls.map(callKey));
+    for (const block of blocks) {
+      if (!block.calls.every(c => running.has(callKey(c)))) continue;
+      cleanedContent = cleanedContent.replace(block.span, '');
+    }
     cleanedContent = cleanedContent.trim();
   }
 

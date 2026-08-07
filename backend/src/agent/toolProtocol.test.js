@@ -181,3 +181,16 @@ test('a tool call quoted inside prose is still never executed', () => {
   assert.equal(resolveToolCalls([], content, true).toolCalls.length, 0);
   assert.equal(resolveToolCalls([], content, false).toolCalls.length, 0);
 });
+
+test('a refused fenced call stays in the reply instead of vanishing', () => {
+  // Observed live from qwen2.5-coder: "Now I will write this to summary.md"
+  // followed by a fenced write_file. The call is correctly not run, but it was
+  // also being stripped from the content — so the user saw the model announce
+  // a write, no tool card, no file, and a turn reported as complete.
+  const content = 'Now, I will write this summary to a file called summary.md.\n\n'
+    + '```json\n{"name":"write_file","arguments":{"filePath":"summary.md","content":"hi"}}\n```';
+  const { toolCalls, cleanedContent } = resolveToolCalls([], content, false);
+
+  assert.equal(toolCalls.length, 0, 'the guard still refuses it');
+  assert.match(cleanedContent, /write_file/, 'what was asked for must remain visible');
+});
