@@ -48,13 +48,25 @@ const ChatSidebar = ({
   const { conversations, conversationId, startNewConversation, loadConversationDetail } = useAgentStore();
 
   const [editedCommand, setEditedCommand] = useState('');
+  const [rulePattern, setRulePattern] = useState('');
+
+  // Approving with `remember` saves a rule so this class of call stops asking.
+  const approveWith = (remember) => {
+    // Only run_command is editable; everything else is approved as-is.
+    const editedCall = pendingApproval.name === 'run_command'
+      ? { name: 'run_command', arguments: { ...pendingApproval.arguments, command: editedCommand } }
+      : null;
+    const rememberRule = remember && rulePattern
+      ? { effect: 'allow', tool: pendingApproval.name, pattern: rulePattern }
+      : null;
+    onApprove(pendingApproval.id, { editedCall, rememberRule });
+  };
 
   useEffect(() => {
-    if (pendingApproval && pendingApproval.name === 'run_command') {
-      setEditedCommand(pendingApproval.arguments?.command || '');
-    } else {
-      setEditedCommand('');
-    }
+    setEditedCommand(
+      pendingApproval?.name === 'run_command' ? (pendingApproval.arguments?.command || '') : ''
+    );
+    setRulePattern(pendingApproval?.suggestedPattern || '');
   }, [pendingApproval]);
 
   useEffect(() => {
@@ -188,7 +200,22 @@ const ChatSidebar = ({
                 </pre>
               );
             })()}
-            <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'flex-end' }}>
+            {pendingApproval.suggestedPattern && (
+              <div style={{ margin: '0 0 0.75rem 0', padding: '0.5rem', background: '#252526', borderRadius: '4px', border: '1px solid var(--border-color)' }}>
+                <label style={{ display: 'block', fontSize: '0.75rem', color: '#888', marginBottom: '0.25rem' }}>
+                  Always allow this pattern (saved to the workspace):
+                </label>
+                <input
+                  aria-label="Always-allow pattern"
+                  type="text"
+                  value={rulePattern}
+                  onChange={(e) => setRulePattern(e.target.value)}
+                  style={{ width: '100%', background: '#1e1e1e', border: '1px solid var(--border-color)', borderRadius: '4px', padding: '0.35rem 0.5rem', color: '#d4d4d4', fontSize: '0.8rem', fontFamily: 'monospace', boxSizing: 'border-box' }}
+                />
+              </div>
+            )}
+
+            <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'flex-end', flexWrap: 'wrap' }}>
               <button
                 onClick={() => onDeny(pendingApproval.id)}
                 style={{ background: 'transparent', border: '1px solid var(--border-color)', color: 'var(--text-primary)', padding: '0.5rem 1rem', borderRadius: '4px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '0.25rem' }}
@@ -196,17 +223,20 @@ const ChatSidebar = ({
                 <X size={14} /> Reject
               </button>
               <button
-                onClick={() => {
-                  // Only run_command is editable; everything else is approved as-is.
-                  const editedCall = pendingApproval.name === 'run_command'
-                    ? { name: 'run_command', arguments: { ...pendingApproval.arguments, command: editedCommand } }
-                    : null;
-                  onApprove(pendingApproval.id, editedCall);
-                }}
+                onClick={() => approveWith(false)}
                 style={{ background: 'var(--text-primary)', border: 'none', color: 'var(--bg-color)', padding: '0.5rem 1rem', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold', display: 'flex', alignItems: 'center', gap: '0.25rem' }}
               >
-                <Check size={14} /> Approve
+                <Check size={14} /> Approve once
               </button>
+              {pendingApproval.suggestedPattern && (
+                <button
+                  onClick={() => approveWith(true)}
+                  title={`Save an allow rule for ${pendingApproval.name} matching ${rulePattern}`}
+                  style={{ background: '#2d4a2d', border: '1px solid #4a7a4a', color: '#c2f8cb', padding: '0.5rem 1rem', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold', display: 'flex', alignItems: 'center', gap: '0.25rem' }}
+                >
+                  <Check size={14} /> Always allow
+                </button>
+              )}
             </div>
           </div>
         )}

@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { getPersona } = require('./personas');
+const { getMode } = require('./modes');
 
 // Checked in order; the first that exists wins.
 const PROJECT_FILES = ['AGENTS.md', 'CLAUDE.md', '.agents/AGENTS.md'];
@@ -43,8 +44,12 @@ function loadProjectInstructions(workspacePath) {
  * own instructions. Assembled server-side so a client cannot drop the project
  * rules or widen the persona.
  */
-function buildSystemPrompt({ persona, workspacePath }) {
+function buildSystemPrompt({ persona, workspacePath, mode }) {
   const parts = [getPersona(persona).prompt];
+
+  // Mode instructions go early: they narrow what the persona may do.
+  const modePrompt = getMode(mode).prompt;
+  if (modePrompt) parts.push(modePrompt);
 
   if (workspacePath) {
     parts.push(`Your active workspace is: ${workspacePath}`);
@@ -65,7 +70,7 @@ function buildSystemPrompt({ persona, workspacePath }) {
     );
   }
 
-  return { prompt: parts.join('\n\n'), projectFile: project?.source || null };
+  return { prompt: parts.join('\n\n'), projectFile: project?.source || null, mode: getMode(mode) };
 }
 
 module.exports = { buildSystemPrompt, loadProjectInstructions, PROJECT_FILES };

@@ -3,7 +3,8 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "test": "node --test --test-timeout=20000 \"test/*.test.js\" \"src/**/*.test.js\""
+    "test": "node --test --test-timeout=20000 \"test/*.test.js\" \"src/**/*.test.js\"",
+    "astra": "node bin/astra.js"
   },
   "keywords": [],
   "author": "",
@@ -17,5 +18,8 @@
     "morgan": "^1.11.0",
     "node-pty": "^1.1.0",
     "ws": "^8.21.1"
+  },
+  "bin": {
+    "astra": "./bin/astra.js"
   }
 }

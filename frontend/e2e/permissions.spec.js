@@ -32,7 +32,7 @@ test.describe('approval card', () => {
       approvalCard(page).getByRole('paragraph').filter({ hasText: 'Astra wants to execute:' })
     ).toContainText('write_file');
 
-    await page.getByRole('button', { name: /Approve/ }).click();
+    await page.getByRole('button', { name: /Approve once/ }).click();
 
     await expect(page.getByText('Done.')).toBeVisible();
     await expect.poll(() => mock.posted.approvals.length).toBe(1);
@@ -66,6 +66,69 @@ test.describe('approval card', () => {
     await expect(approvalCard(page).getByText('Permission Required')).toBeHidden();
   });
 
+  test('"always allow" sends a persistable rule alongside the approval', async ({ page }) => {
+    const mock = createSessionMock();
+    mock.phase(
+      ev.messageStart(),
+      ev.toolRunning('call_rule', 'run_command', { command: 'npm test', reason: 'verify' }),
+      {
+        event: 'approval_requested',
+        data: {
+          callId: 'call_rule',
+          name: 'run_command',
+          arguments: { command: 'npm test', reason: 'verify' },
+          suggestedPattern: 'npm*',
+          subject: 'npm test'
+        }
+      }
+    );
+    mock.phase(ev.toolResult('call_rule', '{"success":true}'), ev.completed('complete'));
+
+    await installBaseRoutes(page);
+    await mock.install(page);
+
+    await sendPrompt(page, 'run the tests');
+
+    // The card pre-fills the generalized pattern and lets the user narrow it.
+    const patternInput = page.getByLabel('Always-allow pattern');
+    await expect(patternInput).toHaveValue('npm*');
+    await patternInput.fill('npm test*');
+
+    await page.getByRole('button', { name: /Always allow/ }).click();
+
+    await expect.poll(() => mock.posted.approvals.length).toBe(1);
+    expect(mock.posted.approvals[0].body.approved).toBe(true);
+    expect(mock.posted.approvals[0].body.rememberRule).toEqual({
+      effect: 'allow', tool: 'run_command', pattern: 'npm test*'
+    });
+  });
+
+  test('approving once does not save a rule', async ({ page }) => {
+    const mock = createSessionMock();
+    mock.phase(
+      ev.messageStart(),
+      ev.toolRunning('call_once', 'write_file', { filePath: 'a.txt', content: 'x' }),
+      {
+        event: 'approval_requested',
+        data: {
+          callId: 'call_once', name: 'write_file',
+          arguments: { filePath: 'a.txt', content: 'x' },
+          suggestedPattern: 'a.txt', subject: 'a.txt'
+        }
+      }
+    );
+    mock.phase(ev.toolResult('call_once', '{"success":true}'), ev.completed('complete'));
+
+    await installBaseRoutes(page);
+    await mock.install(page);
+    await sendPrompt(page, 'write a file');
+
+    await page.getByRole('button', { name: /Approve once/ }).click();
+
+    await expect.poll(() => mock.posted.approvals.length).toBe(1);
+    expect(mock.posted.approvals[0].body.rememberRule).toBeNull();
+  });
+
   test('sends an edited command when the user changes it before approving', async ({ page }) => {
     const mock = createSessionMock();
     mock.phase(
@@ -87,7 +150,7 @@ test.describe('approval card', () => {
     await expect(commandInput).toHaveValue('npm test');
     await commandInput.fill('npm test -- --watch=false');
 
-    await page.getByRole('button', { name: /Approve/ }).click();
+    await page.getByRole('button', { name: /Approve once/ }).click();
 
     await expect.poll(() => mock.posted.approvals.length).toBe(1);
     expect(mock.posted.approvals[0].body.editedCall).toEqual({

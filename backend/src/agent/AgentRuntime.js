@@ -3,6 +3,8 @@ const { streamChat, getContextWindow } = require('../llm/chat.js');
 const { executeTool, isMutating, needsWorkspace } = require('../tools');
 const { compactContext, usageSnapshot } = require('./compaction.js');
 const { estimateToolsTokens } = require('./tokens.js');
+const permissions = require('./permissions.js');
+const auditLog = require('./auditLog.js');
 
 // Compact once the prompt passes this share of the usable window.
 const COMPACT_AT = parseFloat(process.env.ASTRA_COMPACT_AT || '0.7');
@@ -22,12 +24,6 @@ const STOP = {
   DENIED: 'denied',
   MAX_ITERATIONS: 'max_iterations',
   ERROR: 'error'
-};
-
-const APPROVAL_REQUIRED_BY_LEVEL = {
-  Strict: () => true,
-  Supervised: (name) => isMutating(name),
-  Autonomous: () => false
 };
 
 // A single unbounded tool result can evict the task from the context window.
@@ -86,7 +82,9 @@ class AgentRuntime {
       model: 'llama3.1',
       tools: [],
       workspacePath: '',
+      sessionId: null,
       authorityLevel: 'Supervised',
+      permissionRules: [],
       maxIterations: 10,
       streamChat,
       executeTool,
@@ -96,6 +94,7 @@ class AgentRuntime {
       onTraceLog: () => {},
       onToolExecuted: () => {},
       onContextUsage: () => {},
+      onRuleAdded: () => {},
       ...options
     };
 
@@ -203,9 +202,17 @@ class AgentRuntime {
     return { toolCalls, content: cleanedContent };
   }
 
-  needsApproval(toolName) {
-    const rule = APPROVAL_REQUIRED_BY_LEVEL[this.options.authorityLevel] || (() => true);
-    return rule(toolName);
+  /**
+   * Rules first, authority level as the fallback. Returns the decision plus
+   * the rule that produced it, so the UI can say why it is asking.
+   */
+  decide(name, args) {
+    return permissions.evaluate({
+      tool: name,
+      args,
+      rules: this.options.permissionRules || [],
+      authorityLevel: this.options.authorityLevel
+    });
   }
 
   /** Pre-flight checks that refuse a call without ever executing it. */
@@ -235,27 +242,56 @@ class AgentRuntime {
     });
 
     let resultString;
+    let outcome;
+    let effectiveCall = call;
+
     const blocked = this.guard(name, args);
+    const { decision, rule, subject } = blocked ? {} : this.decide(name, args);
 
     if (blocked) {
       resultString = blocked;
-    } else if (this.needsApproval(name)) {
+      outcome = 'blocked';
+    } else if (decision === 'deny') {
+      resultString = `Error: A permission rule forbids this call`
+        + (rule?.pattern ? ` (deny ${rule.tool} ${rule.pattern}).` : '.')
+        + ' Do not retry it; tell the user it is blocked.';
+      outcome = 'denied-by-rule';
+      // A standing rule is a policy, not a conversation stopper: the model is
+      // told no and may continue with something else.
+    } else if (decision === 'ask') {
       this.updateState({ pendingApproval: { id: callId, name, arguments: args } });
-      const decision = await this.options.requestApproval({ id: callId, name, arguments: args });
+      const answer = await this.options.requestApproval({
+        id: callId, name, arguments: args,
+        suggestedPattern: permissions.suggestPattern(name, args),
+        subject
+      });
       this.updateState({ pendingApproval: null });
 
-      const approved = typeof decision === 'boolean' ? decision : !!(decision && decision.approved);
-      const edited = decision && typeof decision === 'object' ? decision.editedCall : null;
+      const approved = typeof answer === 'boolean' ? answer : !!(answer && answer.approved);
+      const edited = answer && typeof answer === 'object' ? answer.editedCall : null;
+      const remember = answer && typeof answer === 'object' ? answer.rememberRule : null;
+
+      // "Allow always for this pattern" — persisted so the next run inherits it.
+      if (remember && this.options.workspacePath) {
+        const saved = permissions.addRule(this.options.workspacePath, remember);
+        if (saved) {
+          this.options.permissionRules = [...(this.options.permissionRules || []), saved];
+          this.options.onRuleAdded?.(saved);
+        }
+      }
 
       if (!approved) {
         resultString = 'Error: User explicitly denied permission to execute this tool.';
+        outcome = 'denied-by-user';
         this.updateState({ stopReason: STOP.DENIED });
       } else {
-        const effective = edited ? normalizeEditedCall(edited, call) : call;
-        resultString = await this.execute(effective);
+        effectiveCall = edited ? normalizeEditedCall(edited, call) : call;
+        resultString = await this.execute(effectiveCall);
+        outcome = edited ? 'approved-edited' : 'approved';
       }
     } else {
       resultString = await this.execute(call);
+      outcome = rule ? 'allowed-by-rule' : 'allowed';
     }
 
     let parsed = null;
@@ -268,10 +304,22 @@ class AgentRuntime {
       if (path) this.sessionReadFiles.set(path, parsed.contentHash);
     }
 
+    auditLog.record(this.options.workspacePath, {
+      sessionId: this.options.sessionId || null,
+      callId,
+      tool: name,
+      args: effectiveCall.arguments || args,
+      decision: decision || 'blocked',
+      rule: rule ? `${rule.effect} ${rule.tool} ${rule.pattern}` : null,
+      outcome,
+      success: parsed ? parsed.success !== false : !String(resultString).startsWith('Error:'),
+      error: parsed?.error || null
+    });
+
     if (parsed) this.options.onToolExecuted(name, args, parsed, callId);
 
     this.options.onMessageUpdate(this.messageId, {
-      tool_execution_result: { id: callId, status: 'completed', result: resultString }
+      tool_execution_result: { id: callId, status: 'completed', result: resultString, outcome }
     });
 
     // tool_call_id is what lets the model (and the Anthropic adapter) match a

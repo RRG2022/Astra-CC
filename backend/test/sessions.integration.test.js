@@ -521,6 +521,246 @@ test('a model that writes its tool call as the whole message still gets it run',
   sse.close();
 });
 
+test('a deny rule blocks a call without ever asking the user', async () => {
+  const ws = createWorkspace();
+  fs.mkdirSync(path.join(ws, '.astra'), { recursive: true });
+  fs.writeFileSync(path.join(ws, '.astra', 'permissions.json'), JSON.stringify({
+    rules: [{ effect: 'deny', tool: 'run_command', pattern: 'rm *' }]
+  }));
+
+  fake.push([toolCallChunk('run_command', { command: 'rm -rf build', reason: 'clean' })]);
+  fake.push(textChunks('That command is blocked.'));
+
+  // Autonomous would normally run this without asking — deny must still win.
+  const { sessionId, sse } = await startSession(ws, { authorityLevel: 'Autonomous' });
+  await send(sessionId, 'clean the build');
+
+  const done = await sse.waitFor('loop_completed', { label: 'loop_completed' });
+  assert.equal(done.data.stopReason, 'complete');
+  assert.equal(sse.of('approval_requested').length, 0, 'a deny rule must not prompt');
+
+  const toolMsg = fake.requests[1].messages.find(m => m.role === 'tool');
+  assert.match(toolMsg.content, /permission rule forbids/);
+
+  sse.close();
+});
+
+test('an allow rule runs a mutating call without prompting under Supervised', async () => {
+  const ws = createWorkspace();
+  fs.mkdirSync(path.join(ws, '.astra'), { recursive: true });
+  fs.writeFileSync(path.join(ws, '.astra', 'permissions.json'), JSON.stringify({
+    rules: [{ effect: 'allow', tool: 'write_file', pattern: 'notes/**' }]
+  }));
+
+  fake.push([toolCallChunk('write_file', { filePath: 'notes/a.md', content: 'hi' })]);
+  fake.push(textChunks('Written.'));
+
+  const { sessionId, sse } = await startSession(ws); // Supervised
+  await send(sessionId, 'write a note');
+  await sse.waitFor('loop_completed', { label: 'loop_completed' });
+
+  assert.equal(sse.of('approval_requested').length, 0, 'the rule should spare the prompt');
+  assert.equal(fs.readFileSync(path.join(ws, 'notes/a.md'), 'utf8'), 'hi');
+
+  // A path outside the rule still asks.
+  fake.push([toolCallChunk('write_file', { filePath: 'src/b.js', content: 'x' })]);
+  await send(sessionId, 'write source');
+  const ask = await sse.waitFor('approval_requested', { label: 'approval_requested' });
+  assert.equal(ask.data.name, 'write_file');
+
+  await api(`/api/sessions/${sessionId}/approve/${ask.data.callId}`, { body: { approved: false } });
+  await sse.waitFor((e) => e.event === 'loop_completed' && sse.of('loop_completed').length === 2,
+    { label: 'second completion' });
+
+  sse.close();
+});
+
+test('"allow always" persists a rule that applies on the next turn', async () => {
+  const ws = createWorkspace();
+  fake.push([toolCallChunk('run_command', { command: 'npm test', reason: 'verify' })]);
+  fake.push(textChunks('Tests ran.'));
+
+  const { sessionId, sse } = await startSession(ws);
+  await send(sessionId, 'run the tests');
+
+  const ask = await sse.waitFor('approval_requested', { label: 'approval_requested' });
+  assert.equal(ask.data.suggestedPattern, 'npm*', 'the card offers a generalized pattern');
+
+  await api(`/api/sessions/${sessionId}/approve/${ask.data.callId}`, {
+    body: {
+      approved: true,
+      rememberRule: { effect: 'allow', tool: 'run_command', pattern: 'npm*' }
+    }
+  });
+  await sse.waitFor('loop_completed', { label: 'loop_completed' });
+
+  // Written to the workspace, so it survives the session.
+  const saved = JSON.parse(fs.readFileSync(path.join(ws, '.astra', 'permissions.json'), 'utf8'));
+  assert.deepEqual(saved.rules, [{ effect: 'allow', tool: 'run_command', pattern: 'npm*' }]);
+
+  // And the next npm command runs unprompted.
+  fake.push([toolCallChunk('run_command', { command: 'npm run build', reason: 'build' })]);
+  fake.push(textChunks('Built.'));
+  await send(sessionId, 'build it');
+  await sse.waitFor((e) => e.event === 'loop_completed' && sse.of('loop_completed').length === 2,
+    { label: 'second completion' });
+
+  assert.equal(sse.of('approval_requested').length, 1, 'the saved rule must prevent a second prompt');
+
+  sse.close();
+});
+
+test('every tool call is written to the audit log with its decision', async () => {
+  const ws = createWorkspace();
+  fs.writeFileSync(path.join(ws, 'a.txt'), 'hello');
+
+  fake.push([toolCallChunk('read_file', { filePath: 'a.txt' })]);
+  fake.push([toolCallChunk('run_command', { command: 'rm -rf /', reason: 'no' })]);
+  fake.push(textChunks('Done.'));
+
+  fs.mkdirSync(path.join(ws, '.astra'), { recursive: true });
+  fs.writeFileSync(path.join(ws, '.astra', 'permissions.json'), JSON.stringify({
+    rules: [{ effect: 'deny', tool: 'run_command', pattern: 'rm *' }]
+  }));
+
+  const { sessionId, sse } = await startSession(ws, { authorityLevel: 'Autonomous' });
+  await send(sessionId, 'read then delete');
+  await sse.waitFor('loop_completed', { label: 'loop_completed' });
+
+  const lines = fs.readFileSync(path.join(ws, '.astra', 'audit.jsonl'), 'utf8')
+    .split('\n').filter(Boolean).map(JSON.parse);
+
+  assert.equal(lines.length, 2);
+  assert.equal(lines[0].tool, 'read_file');
+  assert.equal(lines[0].outcome, 'allowed');
+  assert.equal(lines[0].success, true);
+  assert.equal(lines[0].sessionId, sessionId);
+
+  assert.equal(lines[1].tool, 'run_command');
+  assert.equal(lines[1].decision, 'deny');
+  assert.equal(lines[1].outcome, 'denied-by-rule');
+  assert.match(lines[1].rule, /deny run_command rm \*/);
+
+  // Readable back through the API.
+  const audit = await api(
+    `/api/sessions/audit/list?workspacePath=${encodeURIComponent(ws)}`, { method: 'GET' });
+  assert.equal(audit.body.entries.length, 2);
+
+  sse.close();
+});
+
+test('the audit log records file contents by size, not by copying them', async () => {
+  const ws = createWorkspace();
+  const huge = 'z'.repeat(20000);
+
+  fake.push([toolCallChunk('write_file', { filePath: 'big.txt', content: huge })]);
+  fake.push(textChunks('Wrote it.'));
+
+  const { sessionId, sse } = await startSession(ws, { authorityLevel: 'Autonomous' });
+  await send(sessionId, 'write a big file');
+  await sse.waitFor('loop_completed', { label: 'loop_completed' });
+
+  const entry = JSON.parse(
+    fs.readFileSync(path.join(ws, '.astra', 'audit.jsonl'), 'utf8').split('\n').filter(Boolean)[0]
+  );
+  assert.ok(entry.args.content.length < 1000, 'the log records what was done, not a second copy');
+  assert.match(entry.args.content, /\[20000 chars\]/);
+
+  sse.close();
+});
+
+test('plan mode withholds mutating tools from the model entirely', async () => {
+  const ws = createWorkspace();
+  fake.push(textChunks('Here is my plan: 1. read the file. 2. change it.'));
+
+  const { body } = await api('/api/sessions', {
+    body: { workspacePath: ws, model: 'test-model', mode: 'plan', tools: TOOLS }
+  });
+  assert.equal(body.mode, 'plan');
+
+  const sse = await openSse(`${baseUrl}/api/sessions/${body.sessionId}/stream?token=${TOKEN}`);
+  openStreams.push(sse);
+  await send(body.sessionId, 'change the config');
+  await sse.waitFor('loop_completed', { label: 'loop_completed' });
+
+  // The guarantee is capability-level: they are simply not in the request.
+  const sent = (fake.requests[0].tools || []).map(t => t.function.name);
+  assert.ok(sent.includes('read_file'));
+  assert.ok(!sent.includes('write_file'), 'plan mode must not offer write_file');
+
+  const system = fake.requests[0].messages[0].content;
+  assert.match(system, /PLAN MODE/);
+
+  sse.close();
+});
+
+test('leaving plan mode restores the mutating tools', async () => {
+  const ws = createWorkspace();
+  fake.push(textChunks('Plan: write a.txt.'));
+
+  const { body } = await api('/api/sessions', {
+    body: { workspacePath: ws, model: 'test-model', mode: 'plan', tools: TOOLS }
+  });
+  const sse = await openSse(`${baseUrl}/api/sessions/${body.sessionId}/stream?token=${TOKEN}`);
+  openStreams.push(sse);
+
+  await send(body.sessionId, 'plan a change');
+  await sse.waitFor('loop_completed', { label: 'loop_completed' });
+
+  // Approving the plan is exactly "leave plan mode".
+  const switched = await api(`/api/sessions/${body.sessionId}/mode`, {
+    body: { mode: 'build', workspacePath: ws }
+  });
+  assert.equal(switched.status, 200);
+  assert.ok(switched.body.tools.includes('write_file'));
+
+  const changed = await sse.waitFor('mode_changed', { label: 'mode_changed' });
+  assert.equal(changed.data.mode, 'build');
+  assert.equal(changed.data.readOnly, false);
+
+  fake.push(textChunks('Done.'));
+  await send(body.sessionId, 'go ahead');
+  await sse.waitFor((e) => e.event === 'loop_completed' && sse.of('loop_completed').length === 2,
+    { label: 'second completion' });
+
+  const sent = (fake.requests[1].tools || []).map(t => t.function.name);
+  assert.ok(sent.includes('write_file'), 'build mode restores the write tools');
+  assert.doesNotMatch(fake.requests[1].messages[0].content, /PLAN MODE/);
+
+  sse.close();
+});
+
+test('plan mode and a persona limit compose rather than override', async () => {
+  const ws = createWorkspace();
+  fake.push(textChunks('Plan.'));
+
+  // app_admin already lacks write tools; plan mode also removes run_command.
+  const { body } = await api('/api/sessions', {
+    body: { workspacePath: ws, model: 'test-model', mode: 'plan', persona: 'app_admin', tools: TOOLS }
+  });
+  const sse = await openSse(`${baseUrl}/api/sessions/${body.sessionId}/stream?token=${TOKEN}`);
+  openStreams.push(sse);
+  await send(body.sessionId, 'investigate');
+  await sse.waitFor('loop_completed', { label: 'loop_completed' });
+
+  const sent = (fake.requests[0].tools || []).map(t => t.function.name);
+  assert.deepEqual(sent.sort(), ['list_dir', 'read_file']);
+
+  sse.close();
+});
+
+test('an unknown mode is rejected rather than silently ignored', async () => {
+  const ws = createWorkspace();
+  const { body } = await api('/api/sessions', {
+    body: { workspacePath: ws, model: 'test-model', tools: TOOLS }
+  });
+
+  const bad = await api(`/api/sessions/${body.sessionId}/mode`, {
+    body: { mode: 'yolo', workspacePath: ws }
+  });
+  assert.equal(bad.status, 400);
+});
+
 test('a looping model is stopped at maxIterations', async () => {
   const ws = createWorkspace();
   // The model never stops asking for tools; the runtime must cap it.

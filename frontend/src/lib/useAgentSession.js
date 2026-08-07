@@ -78,8 +78,11 @@ export function useAgentSession(options) {
     });
 
     es.addEventListener('approval_requested', (e) => {
-      const { callId, name, arguments: args } = JSON.parse(e.data);
-      setState(prev => ({ ...prev, pendingApproval: { id: callId, name, arguments: args } }));
+      const { callId, name, arguments: args, suggestedPattern, subject } = JSON.parse(e.data);
+      setState(prev => ({
+        ...prev,
+        pendingApproval: { id: callId, name, arguments: args, suggestedPattern, subject }
+      }));
     });
 
     es.addEventListener('context_usage', (e) => {
@@ -149,18 +152,18 @@ export function useAgentSession(options) {
     });
   }, [sessionId]);
 
-  const decide = useCallback(async (callId, approved, editedCall = null) => {
+  const decide = useCallback(async (callId, approved, { editedCall = null, rememberRule = null } = {}) => {
     if (!sessionId || !callId) return;
     setState(prev => ({ ...prev, pendingApproval: null }));
     await apiFetch(`/api/sessions/${sessionId}/approve/${callId}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ approved, editedCall })
+      body: JSON.stringify({ approved, editedCall, rememberRule })
     });
   }, [sessionId]);
 
-  const approve = useCallback((callId, editedCall) => decide(callId, true, editedCall), [decide]);
-  const deny = useCallback((callId) => decide(callId, false), [decide]);
+  const approve = useCallback((callId, opts) => decide(callId, true, opts), [decide]);
+  const deny = useCallback((callId, opts) => decide(callId, false, opts), [decide]);
 
   return { ...state, run, cancel, approve, deny };
 }
