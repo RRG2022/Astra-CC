@@ -1,4 +1,6 @@
 import { create } from 'zustand';
+import { apiFetch } from '../api.js';
+
 
 export const useWorkspaceStore = create((set, get) => ({
   workspacePath: localStorage.getItem('astra_workspace') || '',
@@ -14,7 +16,7 @@ export const useWorkspaceStore = create((set, get) => ({
   fetchDir: async (pathStr = '') => {
     const wsPath = pathStr || get().workspacePath;
     try {
-      const res = await fetch('http://localhost:8789/api/fs/list', {
+      const res = await apiFetch('/api/fs/list', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ dirPath: wsPath })

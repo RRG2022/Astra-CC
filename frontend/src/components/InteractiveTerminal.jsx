@@ -2,6 +2,7 @@ import React, { useEffect, useRef } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
+import { getWsUrl } from '../lib/api.js';
 
 const InteractiveTerminal = ({ workspacePath, sessionId }) => {
   const terminalRef = useRef(null);
@@ -33,7 +34,7 @@ const InteractiveTerminal = ({ workspacePath, sessionId }) => {
     fitAddonRef.current = fitAddon;
 
     const cwd = workspacePath ? encodeURIComponent(workspacePath) : '';
-    const ws = new WebSocket(`ws://localhost:8789/api/pty?cwd=${cwd}&cols=${term.cols}&rows=${term.rows}`);
+    const ws = new WebSocket(getWsUrl(`/api/pty?cwd=${cwd}&cols=${term.cols}&rows=${term.rows}`));
     wsRef.current = ws;
 
     ws.onmessage = (event) => {

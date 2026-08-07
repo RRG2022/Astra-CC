@@ -2,6 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { History, Undo, FileText, Check, AlertTriangle, ArrowLeft } from 'lucide-react';
 import { useWorkspaceStore } from '../lib/stores/useWorkspaceStore';
 import { useFileStore } from '../lib/stores/useFileStore';
+import { apiFetch } from '../lib/api.js';
+
 
 // LCS Line Diffing implementation
 function diffLines(oldStr, newStr) {
@@ -65,7 +67,7 @@ export default function CheckpointPanel({ onClose, handleRewind }) {
     const fetchHistory = async () => {
       setLoading(true);
       try {
-        const res = await fetch('http://localhost:8789/api/shadow/history', {
+        const res = await apiFetch('/api/shadow/history', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ workspacePath, filePath: activeFileIdMain })
@@ -93,7 +95,7 @@ export default function CheckpointPanel({ onClose, handleRewind }) {
 
     const fetchCommitContent = async () => {
       try {
-        const res = await fetch('http://localhost:8789/api/shadow/show', {
+        const res = await apiFetch('/api/shadow/show', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -120,7 +122,7 @@ export default function CheckpointPanel({ onClose, handleRewind }) {
     try {
       await handleRewind(activeFileIdMain, selectedCommit.sha);
       // Reload history
-      const res = await fetch('http://localhost:8789/api/shadow/history', {
+      const res = await apiFetch('/api/shadow/history', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ workspacePath, filePath: activeFileIdMain })

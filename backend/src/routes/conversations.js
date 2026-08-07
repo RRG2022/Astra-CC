@@ -47,6 +47,7 @@ router.get('/:id', (req, res) => {
   const { workspacePath } = req.query;
   const { id } = req.params;
   if (!workspacePath) return res.status(400).json({ error: 'workspacePath is required' });
+  if (!id || !/^[a-zA-Z0-9_-]+$/.test(id)) return res.status(400).json({ error: 'Invalid conversation ID' });
   
   try {
     const dir = getConversationsDir(workspacePath);
@@ -66,7 +67,7 @@ router.post('/', (req, res) => {
   const { workspacePath } = req.query;
   const { id, title, messages } = req.body;
   if (!workspacePath) return res.status(400).json({ error: 'workspacePath is required' });
-  if (!id) return res.status(400).json({ error: 'id is required' });
+  if (!id || !/^[a-zA-Z0-9_-]+$/.test(id)) return res.status(400).json({ error: 'Invalid conversation ID' });
 
   try {
     const dir = getConversationsDir(workspacePath);
@@ -89,6 +90,7 @@ router.delete('/:id', (req, res) => {
   const { workspacePath } = req.query;
   const { id } = req.params;
   if (!workspacePath) return res.status(400).json({ error: 'workspacePath is required' });
+  if (!id || !/^[a-zA-Z0-9_-]+$/.test(id)) return res.status(400).json({ error: 'Invalid conversation ID' });
 
   try {
     const dir = getConversationsDir(workspacePath);

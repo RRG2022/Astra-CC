@@ -1,150 +1,160 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
+import { apiFetch, getSseUrl } from './api.js';
 
+const IDLE_STATE = {
+  isStreaming: false,
+  isExecutingTool: false,
+  pendingApproval: null,
+  stopReason: null,
+  error: null,
+  currentActionId: null,
+  iterationCount: 0
+};
+
+/**
+ * Drives a server-side agent session. The browser is a viewer: it posts a
+ * message, watches an SSE stream, and answers approval requests. All events are
+ * keyed by the assistant message id the client itself supplied, so the two
+ * sides never have to agree on an array index.
+ */
 export function useAgentSession(options) {
-  const { onMessageUpdate, onTraceLog, onToolExecuted, model, tools, workspacePath, authorityLevel, maxIterations } = options;
+  const {
+    onMessageUpdate, onTraceLog, onToolExecuted,
+    model, tools, workspacePath, authorityLevel, maxIterations
+  } = options;
 
-  const [state, setState] = useState({
-    isStreaming: false,
-    isExecutingTool: false,
-    pendingApproval: null,
-    stopReason: null,
-    currentActionId: null,
-    iterationCount: 0
-  });
-
+  const [state, setState] = useState(IDLE_STATE);
   const [sessionId, setSessionId] = useState(null);
-  const eventSourceRef = useRef(null);
-  
-  // Create an active reference for latest initialContext
-  const initialContextRef = useRef([]);
 
-  // Store options in ref so SSE listeners don't become stale closures
+  // Held in a ref so the SSE listeners never close over stale callbacks.
   const callbacksRef = useRef({ onMessageUpdate, onTraceLog, onToolExecuted });
   useEffect(() => {
     callbacksRef.current = { onMessageUpdate, onTraceLog, onToolExecuted };
   }, [onMessageUpdate, onTraceLog, onToolExecuted]);
 
+  const configRef = useRef({});
+  configRef.current = { model, tools, workspacePath, authorityLevel, maxIterations };
+
   const initSession = useCallback(async (context) => {
+    const cfg = configRef.current;
     try {
-      const res = await fetch('http://localhost:8789/api/sessions', {
+      const res = await apiFetch('/api/sessions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          workspacePath,
-          model,
-          authorityLevel,
-          tools,
-          maxIterations,
+          workspacePath: cfg.workspacePath,
+          model: cfg.model,
+          authorityLevel: cfg.authorityLevel,
+          tools: cfg.tools,
+          maxIterations: cfg.maxIterations,
           initialContext: context
         })
       });
       const data = await res.json();
       setSessionId(data.sessionId);
       return data.sessionId;
-    } catch(err) {
+    } catch (err) {
       console.error('Failed to init session:', err);
+      setState(prev => ({ ...prev, stopReason: 'error', error: 'Could not start a session.' }));
       return null;
     }
-  }, [workspacePath, model, authorityLevel, tools, maxIterations]);
+  }, []);
 
   useEffect(() => {
     if (!sessionId) return;
-    
-    const es = new EventSource(`http://localhost:8789/api/sessions/${sessionId}/stream`);
-    eventSourceRef.current = es;
+
+    const es = new EventSource(getSseUrl(`/api/sessions/${sessionId}/stream`));
 
     es.addEventListener('state_change', (e) => {
-      const newState = JSON.parse(e.data);
-      setState(prev => ({ ...prev, ...newState }));
+      const next = JSON.parse(e.data);
+      setState(prev => ({ ...prev, ...next }));
     });
 
     es.addEventListener('message_update', (e) => {
-      const { index, update } = JSON.parse(e.data);
-      callbacksRef.current.onMessageUpdate(index, update);
-    });
-
-    es.addEventListener('trace_log', (e) => {
-      if (callbacksRef.current.onTraceLog) {
-        callbacksRef.current.onTraceLog(JSON.parse(e.data));
-      }
+      const { messageId, update } = JSON.parse(e.data);
+      callbacksRef.current.onMessageUpdate(messageId, update);
     });
 
     es.addEventListener('approval_requested', (e) => {
-      const { call } = JSON.parse(e.data);
-      setState(prev => ({ ...prev, pendingApproval: call }));
+      const { callId, name, arguments: args } = JSON.parse(e.data);
+      setState(prev => ({ ...prev, pendingApproval: { id: callId, name, arguments: args } }));
+    });
+
+    es.addEventListener('trace_log', (e) => {
+      callbacksRef.current.onTraceLog?.(JSON.parse(e.data));
     });
 
     es.addEventListener('tool_executed', (e) => {
       const { name, args, result } = JSON.parse(e.data);
-      if (callbacksRef.current.onToolExecuted) {
-        callbacksRef.current.onToolExecuted(name, args, result);
-      }
-    });
-    
-    es.addEventListener('loop_completed', (e) => {
-       // Loop finished
-       setState(prev => ({ ...prev, isStreaming: false, isExecutingTool: false }));
+      callbacksRef.current.onToolExecuted?.(name, args, result);
     });
 
-    return () => {
-      es.close();
+    es.addEventListener('loop_completed', (e) => {
+      const { stopReason, error } = JSON.parse(e.data);
+      setState(prev => ({
+        ...prev,
+        isStreaming: false,
+        isExecutingTool: false,
+        pendingApproval: null,
+        stopReason,
+        error: error || null
+      }));
+    });
+
+    es.onerror = () => {
+      // EventSource retries on its own; surface only that the stream dropped.
+      setState(prev => (prev.isStreaming || prev.isExecutingTool)
+        ? { ...prev, error: 'Lost connection to the agent stream.' }
+        : prev);
     };
+
+    return () => es.close();
   }, [sessionId]);
 
-  const run = useCallback(async (initialContext, agentMsgIndex) => {
-    let currentSessionId = sessionId;
-    if (!currentSessionId) {
-      currentSessionId = await initSession(initialContext.slice(0, -1)); // all but the latest user msg
+  /** Sends one user turn. `messageId` addresses the assistant reply. */
+  const run = useCallback(async (context, messageId) => {
+    let id = sessionId;
+    if (!id) {
+      // Everything but the new user turn becomes the session's opening context.
+      id = await initSession(context.slice(0, -1));
+      if (!id) return;
     }
 
-    if (!currentSessionId) return;
+    setState(prev => ({ ...prev, stopReason: null, error: null }));
 
-    const lastMsg = initialContext[initialContext.length - 1];
-    await fetch(`http://localhost:8789/api/sessions/${currentSessionId}/message`, {
+    const res = await apiFetch(`/api/sessions/${id}/message`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: lastMsg })
+      body: JSON.stringify({ message: context[context.length - 1], assistantMessageId: messageId })
     });
+
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      setState(prev => ({ ...prev, stopReason: 'error', error: body.error || 'Failed to send message.' }));
+    }
   }, [sessionId, initSession]);
 
-  const cancel = useCallback(() => {
-    // optional: add cancellation endpoint
-  }, []);
-
-  const approve = useCallback(async (actionId, editedCall = null) => {
+  const cancel = useCallback(async () => {
     if (!sessionId) return;
-    await fetch(`http://localhost:8789/api/sessions/${sessionId}/approve/${actionId}`, {
+    await apiFetch(`/api/sessions/${sessionId}/cancel`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ approved: true, editedCall })
+      body: JSON.stringify({})
     });
-    setState(prev => ({ ...prev, pendingApproval: null }));
   }, [sessionId]);
 
-  const deny = useCallback(async (actionId) => {
-    if (!sessionId) return;
-    await fetch(`http://localhost:8789/api/sessions/${sessionId}/approve/${actionId}`, {
+  const decide = useCallback(async (callId, approved, editedCall = null) => {
+    if (!sessionId || !callId) return;
+    setState(prev => ({ ...prev, pendingApproval: null }));
+    await apiFetch(`/api/sessions/${sessionId}/approve/${callId}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ approved: false })
+      body: JSON.stringify({ approved, editedCall })
     });
-    setState(prev => ({ ...prev, pendingApproval: null }));
   }, [sessionId]);
-  
-  // Provide backwards compatible `requestApproval` structure if needed by other parts of App
-  const requestApproval = useCallback((call) => {
-     return new Promise(() => {
-        // We never resolve this promise because the backend holds the actual pause.
-        // But if the frontend relies on it returning a Promise to pause, this will do it.
-     });
-  }, []);
 
-  return {
-    ...state,
-    run,
-    cancel,
-    approve,
-    deny,
-    requestApproval
-  };
+  const approve = useCallback((callId, editedCall) => decide(callId, true, editedCall), [decide]);
+  const deny = useCallback((callId) => decide(callId, false), [decide]);
+
+  return { ...state, run, cancel, approve, deny };
 }

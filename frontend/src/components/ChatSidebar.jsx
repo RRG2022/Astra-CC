@@ -10,7 +10,10 @@ const ChatSidebar = ({
   messages,
   handleRewind,
   activeTool,
-  pendingTool,
+  pendingApproval,
+  onApprove,
+  onDeny,
+  agentError,
   attachments,
   removeAttachment,
   PERSONAS,
@@ -45,30 +48,16 @@ const ChatSidebar = ({
   const [editedCommand, setEditedCommand] = useState('');
 
   useEffect(() => {
-    if (pendingTool) {
-      const funcName = pendingTool.call.function ? pendingTool.call.function.name : pendingTool.call.name;
-      if (funcName === 'run_command') {
-        const args = pendingTool.call.function ? pendingTool.call.function.arguments : pendingTool.call.arguments;
-        let commandVal = '';
-        if (typeof args === 'string') {
-          try {
-            commandVal = JSON.parse(args).command || '';
-          } catch (e) {
-            commandVal = args;
-          }
-        } else if (args && typeof args === 'object') {
-          commandVal = args.command || '';
-        }
-        setEditedCommand(commandVal);
-      }
+    if (pendingApproval && pendingApproval.name === 'run_command') {
+      setEditedCommand(pendingApproval.arguments?.command || '');
     } else {
       setEditedCommand('');
     }
-  }, [pendingTool]);
+  }, [pendingApproval]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, activeTool, pendingTool]);
+  }, [messages, activeTool, pendingApproval]);
 
   return (
     <div className="chat-sidebar" style={{ width: sidebarWidth }}>
@@ -142,56 +131,50 @@ const ChatSidebar = ({
         )}
 
         {/* Permission Inline Block */}
-        {pendingTool && (
+        {pendingApproval && (
           <div style={{ background: '#2c2c2c', border: '1px solid #d35400', borderRadius: '8px', padding: '1rem', marginTop: '1rem' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', color: '#e67e22', marginBottom: '0.5rem', fontWeight: 'bold' }}>
               <AlertTriangle size={18} /> Permission Required
             </div>
             <p style={{ margin: '0 0 0.5rem 0', fontSize: '0.9rem', color: 'var(--text-primary)' }}>
-              Astra wants to execute: <strong>{pendingTool.call.function ? pendingTool.call.function.name : pendingTool.call.name}</strong>
+              Astra wants to execute: <strong>{pendingApproval.name}</strong>
             </p>
             {(() => {
-              const funcName = pendingTool.call.function ? pendingTool.call.function.name : pendingTool.call.name;
-              const args = pendingTool.call.function ? pendingTool.call.function.arguments : pendingTool.call.arguments;
+              const args = pendingApproval.arguments || {};
 
-              if (funcName === 'edit_file') {
-                let parsedArgs = args;
-                if (typeof args === 'string') {
-                  try { parsedArgs = JSON.parse(args); } catch (e) {}
-                }
-
+              if (pendingApproval.name === 'edit_file') {
                 return (
                   <div style={{ margin: '0 0 1rem 0', border: '1px solid var(--border-color)', borderRadius: '4px', overflow: 'hidden' }}>
-                    <div style={{ background: '#333', color: '#ccc', padding: '0.25rem 0.5rem', fontSize: '0.75rem', borderBottom: '1px solid var(--border-color)' }}>{parsedArgs.filePath}</div>
+                    <div style={{ background: '#333', color: '#ccc', padding: '0.25rem 0.5rem', fontSize: '0.75rem', borderBottom: '1px solid var(--border-color)' }}>{args.filePath}</div>
                     <pre style={{ background: '#3a1d1d', color: '#f8c2c2', padding: '0.5rem', margin: 0, overflowX: 'auto', fontSize: '0.8rem', borderBottom: '1px solid var(--border-color)' }}>
-                      <span style={{ opacity: 0.5 }}>- </span>{parsedArgs.oldString}
+                      <span style={{ opacity: 0.5 }}>- </span>{args.oldString}
                     </pre>
                     <pre style={{ background: '#1d3a23', color: '#c2f8cb', padding: '0.5rem', margin: 0, overflowX: 'auto', fontSize: '0.8rem' }}>
-                      <span style={{ opacity: 0.5 }}>+ </span>{parsedArgs.newString}
+                      <span style={{ opacity: 0.5 }}>+ </span>{args.newString}
                     </pre>
                   </div>
                 );
               }
 
-              if (funcName === 'run_command') {
+              if (pendingApproval.name === 'run_command') {
                 return (
                   <div style={{ margin: '0 0 1rem 0' }}>
                     <label style={{ display: 'block', fontSize: '0.8rem', color: '#888', marginBottom: '0.25rem' }}>Command to execute:</label>
-                    <input 
-                      type="text" 
-                      value={editedCommand} 
-                      onChange={(e) => setEditedCommand(e.target.value)} 
-                      style={{ 
-                        width: '100%', 
-                        background: '#1e1e1e', 
-                        border: '1px solid var(--border-color)', 
-                        borderRadius: '4px', 
-                        padding: '0.5rem', 
-                        color: '#d4d4d4', 
+                    <input
+                      type="text"
+                      value={editedCommand}
+                      onChange={(e) => setEditedCommand(e.target.value)}
+                      style={{
+                        width: '100%',
+                        background: '#1e1e1e',
+                        border: '1px solid var(--border-color)',
+                        borderRadius: '4px',
+                        padding: '0.5rem',
+                        color: '#d4d4d4',
                         fontSize: '0.85rem',
                         fontFamily: 'monospace',
                         boxSizing: 'border-box'
-                      }} 
+                      }}
                     />
                   </div>
                 );
@@ -204,38 +187,31 @@ const ChatSidebar = ({
               );
             })()}
             <div style={{ display: 'flex', gap: '0.5rem', justifyContent: 'flex-end' }}>
-              <button onClick={() => pendingTool.resolve(false)} style={{ background: 'transparent', border: '1px solid var(--border-color)', color: 'var(--text-primary)', padding: '0.5rem 1rem', borderRadius: '4px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '0.25rem' }}><X size={14} /> Reject</button>
-              <button 
+              <button
+                onClick={() => onDeny(pendingApproval.id)}
+                style={{ background: 'transparent', border: '1px solid var(--border-color)', color: 'var(--text-primary)', padding: '0.5rem 1rem', borderRadius: '4px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '0.25rem' }}
+              >
+                <X size={14} /> Reject
+              </button>
+              <button
                 onClick={() => {
-                  const funcName = pendingTool.call.function ? pendingTool.call.function.name : pendingTool.call.name;
-                  if (funcName === 'run_command') {
-                    const originalArgs = pendingTool.call.function ? pendingTool.call.function.arguments : pendingTool.call.arguments;
-                    let newArgs = {};
-                    if (typeof originalArgs === 'string') {
-                      try { newArgs = JSON.parse(originalArgs); } catch (e) {}
-                    } else if (originalArgs && typeof originalArgs === 'object') {
-                      newArgs = { ...originalArgs };
-                    }
-                    newArgs.command = editedCommand;
-
-                    const editedCall = {
-                      ...pendingTool.call,
-                      function: pendingTool.call.function ? {
-                        ...pendingTool.call.function,
-                        arguments: JSON.stringify(newArgs)
-                      } : undefined,
-                      arguments: pendingTool.call.arguments ? JSON.stringify(newArgs) : undefined
-                    };
-                    pendingTool.resolve({ approved: true, editedCall });
-                  } else {
-                    pendingTool.resolve(true);
-                  }
-                }} 
+                  // Only run_command is editable; everything else is approved as-is.
+                  const editedCall = pendingApproval.name === 'run_command'
+                    ? { name: 'run_command', arguments: { ...pendingApproval.arguments, command: editedCommand } }
+                    : null;
+                  onApprove(pendingApproval.id, editedCall);
+                }}
                 style={{ background: 'var(--text-primary)', border: 'none', color: 'var(--bg-color)', padding: '0.5rem 1rem', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold', display: 'flex', alignItems: 'center', gap: '0.25rem' }}
               >
                 <Check size={14} /> Approve
               </button>
             </div>
+          </div>
+        )}
+
+        {agentError && !pendingApproval && (
+          <div style={{ background: '#3a1d1d', border: '1px solid #a33', borderRadius: '8px', padding: '0.75rem 1rem', marginTop: '1rem', color: '#f8c2c2', fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            <AlertTriangle size={16} /> {agentError}
           </div>
         )}
 

@@ -1,3 +1,7 @@
+const crypto = require('crypto');
+
+const defaultMintId = () => `call_${crypto.randomBytes(8).toString('hex')}`;
+
 function scanJsonObjects(text) {
   const found = [];
   let depth = 0;
@@ -88,7 +92,12 @@ function extractToolCallsFromText(content) {
   return { calls, spans };
 }
 
-function resolveToolCalls(nativeToolCalls, content, allowFallback = false) {
+/**
+ * Every call leaves here with an `id`. That id is the single handle used for
+ * the approval key, the UI card, the tool_call_id in context, and the audit
+ * log — minting it in one place is what keeps those four in agreement.
+ */
+function resolveToolCalls(nativeToolCalls, content, allowFallback = false, mintId = defaultMintId) {
   const seen = new Set();
   const toolCalls = [];
 
@@ -98,6 +107,7 @@ function resolveToolCalls(nativeToolCalls, content, allowFallback = false) {
     const key = callKey(call);
     if (seen.has(key)) continue;
     seen.add(key);
+    if (!call.id) call.id = mintId();
     toolCalls.push(call);
   }
 
@@ -109,6 +119,7 @@ function resolveToolCalls(nativeToolCalls, content, allowFallback = false) {
       const key = callKey(call);
       if (seen.has(key)) continue;
       seen.add(key);
+      if (!call.id) call.id = mintId();
       toolCalls.push(call);
     }
   }
@@ -145,6 +156,7 @@ function anchorToolsForNextTurn(context) {
 }
 
 module.exports = {
+  defaultMintId,
   scanJsonObjects,
   normalizeCall,
   callKey,

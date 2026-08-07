@@ -1,4 +1,6 @@
 import { create } from 'zustand';
+import { apiFetch } from '../api.js';
+
 
 export const useAgentStore = create((set, get) => ({
   models: [],
@@ -22,7 +24,6 @@ export const useAgentStore = create((set, get) => ({
     }
   })(),
   activeTool: null,
-  pendingTool: null,
   modelsLoaded: false,
   activeTask: null,
   
@@ -54,7 +55,6 @@ export const useAgentStore = create((set, get) => ({
   },
   
   setActiveTool: (tool) => set({ activeTool: tool }),
-  setPendingTool: (tool) => set({ pendingTool: tool }),
   setModelsLoaded: (loaded) => set({ modelsLoaded: loaded }),
   setActiveTask: (task) => set({ activeTask: task }),
 
@@ -62,7 +62,7 @@ export const useAgentStore = create((set, get) => ({
   loadConversations: async (workspacePath) => {
     if (!workspacePath) return;
     try {
-      const res = await fetch(`http://localhost:8789/api/conversations?workspacePath=${encodeURIComponent(workspacePath)}`);
+      const res = await apiFetch(`/api/conversations?workspacePath=${encodeURIComponent(workspacePath)}`);
       const data = await res.json();
       if (data.success) {
         set({ conversations: data.conversations });
@@ -75,7 +75,7 @@ export const useAgentStore = create((set, get) => ({
   loadConversationDetail: async (id, workspacePath) => {
     if (!workspacePath) return;
     try {
-      const res = await fetch(`http://localhost:8789/api/conversations/${id}?workspacePath=${encodeURIComponent(workspacePath)}`);
+      const res = await apiFetch(`/api/conversations/${id}?workspacePath=${encodeURIComponent(workspacePath)}`);
       const data = await res.json();
       if (data.success && data.conversation) {
         localStorage.setItem('astra_conversation_id', id);
@@ -113,7 +113,7 @@ export const useAgentStore = create((set, get) => ({
     }
 
     try {
-      await fetch(`http://localhost:8789/api/conversations?workspacePath=${encodeURIComponent(workspacePath)}`, {
+      await apiFetch(`/api/conversations?workspacePath=${encodeURIComponent(workspacePath)}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

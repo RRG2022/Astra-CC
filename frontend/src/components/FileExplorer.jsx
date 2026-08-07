@@ -1,5 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { ChevronRight, ChevronDown, Folder, File, FileText, FileCode, FileImage } from 'lucide-react';
+import { apiFetch } from '../lib/api.js';
+
 
 const FileIcon = ({ filename }) => {
   const ext = filename.split('.').pop().toLowerCase();
@@ -26,7 +28,7 @@ const FileIcon = ({ filename }) => {
   }
 };
 
-const FileNode = ({ node, level, onFileSelect, onContextMenu }) => {
+const FileNode = ({ node, level, onFileSelect, onContextMenu, workspacePath }) => {
   const [expanded, setExpanded] = useState(false);
   const [children, setChildren] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -35,10 +37,10 @@ const FileNode = ({ node, level, onFileSelect, onContextMenu }) => {
     e.stopPropagation();
     if (!node.isDirectory) {
       try {
-        const res = await fetch('http://localhost:8789/api/tools/fs/read', {
+        const res = await apiFetch('/api/tools/fs/read', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ filePath: node.path })
+          body: JSON.stringify({ filePath: node.path, workspacePath })
         });
         const data = await res.json();
         if (data.success) {
@@ -59,10 +61,10 @@ const FileNode = ({ node, level, onFileSelect, onContextMenu }) => {
       if (children.length === 0) {
         setLoading(true);
         try {
-          const res = await fetch('http://localhost:8789/api/fs/list', {
+          const res = await apiFetch('/api/fs/list', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ dirPath: node.path })
+            body: JSON.stringify({ dirPath: node.path, workspacePath })
           });
           const data = await res.json();
           if (data.success) {
@@ -126,6 +128,7 @@ const FileNode = ({ node, level, onFileSelect, onContextMenu }) => {
                 level={level + 1} 
                 onFileSelect={onFileSelect} 
                 onContextMenu={onContextMenu}
+                workspacePath={workspacePath}
               />
             ))
           )}
@@ -162,10 +165,10 @@ const FileExplorer = ({ workspacePath, onFileSelect, onFileSelectSplit }) => {
     const fetchRoot = async () => {
       setLoading(true);
       try {
-        const res = await fetch('http://localhost:8789/api/fs/list', {
+        const res = await apiFetch('/api/fs/list', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ dirPath: workspacePath })
+          body: JSON.stringify({ dirPath: workspacePath, workspacePath })
         });
         const data = await res.json();
         if (data.success) {
@@ -204,6 +207,7 @@ const FileExplorer = ({ workspacePath, onFileSelect, onFileSelectSplit }) => {
             level={0} 
             onFileSelect={onFileSelect} 
             onContextMenu={handleContextMenu}
+            workspacePath={workspacePath}
           />
         ))
       )}
@@ -232,10 +236,10 @@ const FileExplorer = ({ workspacePath, onFileSelect, onFileSelectSplit }) => {
               e.stopPropagation();
               setContextMenu({ visible: false, x: 0, y: 0, node: null });
               try {
-                const res = await fetch('http://localhost:8789/api/tools/fs/read', {
+                const res = await apiFetch('/api/tools/fs/read', {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ filePath: contextMenu.node.path })
+                  body: JSON.stringify({ filePath: contextMenu.node.path, workspacePath })
                 });
                 const data = await res.json();
                 if (data.success) {
@@ -257,10 +261,10 @@ const FileExplorer = ({ workspacePath, onFileSelect, onFileSelectSplit }) => {
               e.stopPropagation();
               setContextMenu({ visible: false, x: 0, y: 0, node: null });
               try {
-                const res = await fetch('http://localhost:8789/api/tools/fs/read', {
+                const res = await apiFetch('/api/tools/fs/read', {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ filePath: contextMenu.node.path })
+                  body: JSON.stringify({ filePath: contextMenu.node.path, workspacePath })
                 });
                 const data = await res.json();
                 if (data.success) {

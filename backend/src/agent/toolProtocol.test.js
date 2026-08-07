@@ -1,13 +1,13 @@
-import assert from 'node:assert/strict';
-import { test } from 'node:test';
-import {
+const assert = require('node:assert/strict');
+const { test } = require('node:test');
+const {
   scanJsonObjects,
   normalizeCall,
   extractToolCallsFromText,
   resolveToolCalls,
   anchorToolsForNextTurn,
   CONTINUATION_MESSAGE
-} from './toolProtocol.js';
+} = require('./toolProtocol.js');
 
 test('scanJsonObjects ignores braces inside string values', () => {
   const src = '{"name":"write_file","arguments":{"content":"function f() { return 1; }"}}';

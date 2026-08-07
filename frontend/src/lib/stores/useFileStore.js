@@ -1,5 +1,7 @@
 import { create } from 'zustand';
 import { useWorkspaceStore } from './useWorkspaceStore';
+import { apiFetch } from '../api.js';
+
 
 export const useFileStore = create((set, get) => ({
   openFilesMain: [],
@@ -20,7 +22,7 @@ export const useFileStore = create((set, get) => ({
     if (!fileObj || !fileObj.unsaved) return;
     
     try {
-      const res = await fetch('http://localhost:8789/api/tools/fs/write', {
+      const res = await apiFetch('/api/tools/fs/write', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ filePath, content: fileObj.content, workspacePath })

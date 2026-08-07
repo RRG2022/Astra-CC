@@ -1,34 +1,21 @@
 const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
-const axios = require('axios');
 const { AgentRuntime } = require('../agent/AgentRuntime.js');
+const { supportsTools } = require('../llm/chat.js');
 
 const activeSessions = new Map();
 
-async function executeToolOnBackend(toolCall, workspacePath) {
-  const name = toolCall.function ? toolCall.function.name : toolCall.name;
-  const argsObj = toolCall.function ? toolCall.function.arguments : toolCall.arguments;
-  let parsedArgs = argsObj;
-  if (typeof argsObj === 'string') {
-    try { parsedArgs = JSON.parse(argsObj); } catch(e) {}
-  }
-  
-  try {
-    const payload = { ...parsedArgs, workspacePath };
-    let url = '';
-    if (name === 'read_file') url = 'http://localhost:8789/api/tools/fs/read';
-    else if (name === 'write_file') url = 'http://localhost:8789/api/tools/fs/write';
-    else if (name === 'edit_file') url = 'http://localhost:8789/api/tools/fs/edit';
-    else if (name === 'list_dir') url = 'http://localhost:8789/api/tools/fs/list';
-    else if (name === 'grep_search') url = 'http://localhost:8789/api/tools/fs/grep';
-    else if (name === 'run_command') url = 'http://localhost:8789/api/tools/terminal/run';
-    else return JSON.stringify({ error: 'Unknown tool' });
+// An unanswered approval otherwise pins the loop, its HTTP handler, and every
+// SSE client attached to the session, forever.
+const APPROVAL_TIMEOUT_MS = parseInt(process.env.ASTRA_APPROVAL_TIMEOUT_MS || '600000', 10);
 
-    const res = await axios.post(url, payload);
-    return JSON.stringify(res.data);
-  } catch(err) {
-    return JSON.stringify({ error: err.response?.data?.error || err.message });
+function emit(session, eventType, data) {
+  const payload = `event: ${eventType}\ndata: ${JSON.stringify(data)}\n\n`;
+  for (const client of session.clients) {
+    try {
+      client.write(payload);
+    } catch { /* client vanished mid-write; the close handler prunes it */ }
   }
 }
 
@@ -36,8 +23,8 @@ async function executeToolOnBackend(toolCall, workspacePath) {
 router.post('/', (req, res) => {
   const sessionId = crypto.randomUUID();
   const { workspacePath, model, authorityLevel, tools, maxIterations, initialContext } = req.body;
-  
-  const session = {
+
+  activeSessions.set(sessionId, {
     id: sessionId,
     workspacePath,
     model: model || 'llama3.1',
@@ -47,10 +34,10 @@ router.post('/', (req, res) => {
     context: initialContext || [],
     pendingApprovals: new Map(),
     clients: new Set(),
-    agentMsgIndex: (initialContext || []).length
-  };
-  
-  activeSessions.set(sessionId, session);
+    running: false,
+    runtime: null
+  });
+
   res.json({ sessionId });
 });
 
@@ -64,35 +51,26 @@ router.get('/:id/stream', (req, res) => {
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders();
 
-  const client = { res };
-  session.clients.add(client);
-
-  req.on('close', () => {
-    session.clients.delete(client);
-  });
+  session.clients.add(res);
+  req.on('close', () => session.clients.delete(res));
 });
 
-function emitToSession(session, eventType, data) {
-  const payload = `event: ${eventType}\ndata: ${JSON.stringify(data)}\n\n`;
-  for (const client of session.clients) {
-    client.res.write(payload);
-  }
-}
-
-// 3. Send message (starts/resumes the loop)
+// 3. Send message (starts the loop)
 router.post('/:id/message', async (req, res) => {
   const session = activeSessions.get(req.params.id);
   if (!session) return res.status(404).json({ error: 'Session not found' });
 
-  const { message } = req.body;
-  if (message) {
-    session.context.push(message);
+  if (session.running) {
+    return res.status(409).json({ error: 'A turn is already in progress for this session' });
   }
 
-  // Acknowledge receipt
-  res.json({ success: true });
+  const { message, assistantMessageId } = req.body;
+  const messageId = assistantMessageId || crypto.randomUUID();
 
-  // Start the agent loop in background
+  if (message) session.context.push(message);
+  session.running = true;
+  res.json({ success: true, messageId });
+
   if (!session.runtime) {
     session.runtime = new AgentRuntime({
       model: session.model,
@@ -100,58 +78,76 @@ router.post('/:id/message', async (req, res) => {
       workspacePath: session.workspacePath,
       authorityLevel: session.authorityLevel,
       maxIterations: session.maxIterations,
-      executeTool: async (call) => await executeToolOnBackend(call, session.workspacePath),
-      requestApproval: async (call) => {
-        return new Promise((resolve) => {
-          const callId = call.id;
-          session.pendingApprovals.set(callId, resolve);
-          emitToSession(session, 'approval_requested', { call });
+      requestApproval: (call) => new Promise((resolve) => {
+        const timer = setTimeout(() => {
+          session.pendingApprovals.delete(call.id);
+          resolve({ approved: false, reason: 'timeout' });
+        }, APPROVAL_TIMEOUT_MS);
+
+        session.pendingApprovals.set(call.id, (decision) => {
+          clearTimeout(timer);
+          resolve(decision);
         });
-      },
-      onStateChange: (state) => {
-        emitToSession(session, 'state_change', state);
-      },
-      onMessageUpdate: (idx, update) => {
-        emitToSession(session, 'message_update', { index: idx, update });
-      },
-      onTraceLog: (log) => {
-        emitToSession(session, 'trace_log', log);
-      },
-      onToolExecuted: (name, args, result) => {
-        emitToSession(session, 'tool_executed', { name, args, result });
-      }
+
+        emit(session, 'approval_requested', {
+          callId: call.id,
+          name: call.name,
+          arguments: call.arguments
+        });
+      }),
+      onStateChange: (state) => emit(session, 'state_change', state),
+      onMessageUpdate: (id, update) => emit(session, 'message_update', { messageId: id, update }),
+      onTraceLog: (log) => emit(session, 'trace_log', log),
+      onToolExecuted: (name, args, result, callId) =>
+        emit(session, 'tool_executed', { callId, name, args, result })
     });
   }
 
-  // The agentMsgIndex is where the assistant's new response will land
-  const agentMsgIndex = session.context.length;
-  // Initialize an empty assistant message placeholder in context
-  session.context.push({ role: 'assistant', content: '' });
+  // Attach tool schemas only if this model can actually accept them.
+  session.runtime.options.tools = (await supportsTools(session.model)) ? session.tools : [];
 
-  emitToSession(session, 'message_start', { index: agentMsgIndex });
+  emit(session, 'message_start', { messageId });
 
   try {
-    await session.runtime.run(session.context.slice(0, -1), agentMsgIndex);
-    // After run, session.runtime.context contains the mutated context with tool results
+    const stopReason = await session.runtime.run(session.context, messageId);
     session.context = session.runtime.context;
-    emitToSession(session, 'loop_completed', { context: session.context });
+    emit(session, 'loop_completed', {
+      stopReason,
+      error: session.runtime.state.error || null,
+      context: session.context
+    });
   } catch (error) {
     console.error('Agent loop error:', error);
-    emitToSession(session, 'error', { message: error.message });
+    emit(session, 'loop_completed', { stopReason: 'error', error: error.message });
+  } finally {
+    session.running = false;
   }
 });
 
-// 4. Approve/Deny tool
-router.post('/:id/approve/:actionId', (req, res) => {
+// 4. Approve/deny a tool call, keyed by the canonical callId from the event
+router.post('/:id/approve/:callId', (req, res) => {
   const session = activeSessions.get(req.params.id);
   if (!session) return res.status(404).json({ error: 'Session not found' });
 
-  const resolve = session.pendingApprovals.get(req.params.actionId);
-  if (!resolve) return res.status(404).json({ error: 'Pending approval not found' });
+  const resolve = session.pendingApprovals.get(req.params.callId);
+  if (!resolve) return res.status(404).json({ error: 'No pending approval with that callId' });
 
-  const { approved, editedCall } = req.body;
-  resolve({ approved, editedCall });
-  session.pendingApprovals.delete(req.params.actionId);
+  session.pendingApprovals.delete(req.params.callId);
+  resolve({ approved: !!req.body.approved, editedCall: req.body.editedCall || null });
+
+  res.json({ success: true });
+});
+
+// 5. Cancel an in-flight turn
+router.post('/:id/cancel', (req, res) => {
+  const session = activeSessions.get(req.params.id);
+  if (!session) return res.status(404).json({ error: 'Session not found' });
+
+  if (session.runtime) session.runtime.cancel();
+  for (const [callId, resolve] of session.pendingApprovals) {
+    session.pendingApprovals.delete(callId);
+    resolve({ approved: false, reason: 'cancelled' });
+  }
 
   res.json({ success: true });
 });

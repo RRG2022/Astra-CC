@@ -1,5 +1,25 @@
 const { resolveToolCalls, anchorToolsForNextTurn, toWireToolCalls } = require('./toolProtocol.js');
-const crypto = require('crypto');
+const { streamChat } = require('../llm/chat.js');
+const { executeTool, isMutating, needsWorkspace } = require('../tools');
+
+/**
+ * Terminal states. `error` exists so a failed model call can never be reported
+ * as a finished turn — the two were indistinguishable before, which made a dead
+ * backend look like a successful empty response.
+ */
+const STOP = {
+  COMPLETE: 'complete',
+  CANCELLED: 'cancelled',
+  DENIED: 'denied',
+  MAX_ITERATIONS: 'max_iterations',
+  ERROR: 'error'
+};
+
+const APPROVAL_REQUIRED_BY_LEVEL = {
+  Strict: () => true,
+  Supervised: (name) => isMutating(name),
+  Autonomous: () => false
+};
 
 class AgentRuntime {
   constructor(options) {
@@ -9,8 +29,9 @@ class AgentRuntime {
       workspacePath: '',
       authorityLevel: 'Supervised',
       maxIterations: 10,
-      executeTool: async () => 'Not implemented',
-      requestApproval: async () => false, // returns boolean
+      streamChat,
+      executeTool,
+      requestApproval: async () => false,
       onStateChange: () => {},
       onMessageUpdate: () => {},
       onTraceLog: () => {},
@@ -23,13 +44,15 @@ class AgentRuntime {
       isExecutingTool: false,
       pendingApproval: null,
       stopReason: null,
+      error: null,
       currentActionId: null,
       iterationCount: 0
     };
 
     this.abortController = null;
-    this.agentMsgIndex = -1;
+    this.messageId = null;
     this.context = [];
+    this.sessionReadFiles = new Map();
   }
 
   updateState(updates) {
@@ -38,281 +61,242 @@ class AgentRuntime {
   }
 
   cancel() {
-    if (this.abortController) {
-      this.abortController.abort();
-    }
-    this.updateState({ stopReason: 'cancelled' });
+    this.updateState({ stopReason: STOP.CANCELLED });
+    if (this.abortController) this.abortController.abort();
   }
 
-  async streamOllama(apiMessages) {
+  get cancelled() {
+    return this.state.stopReason === STOP.CANCELLED;
+  }
+
+  /**
+   * Runs one model turn. Returns the resolved tool calls, or null if the turn
+   * failed — in which case stopReason is already set to `error`.
+   */
+  async stream(apiMessages) {
     this.updateState({ isStreaming: true });
     this.abortController = new AbortController();
 
-    const payload = {
-      model: this.options.model,
-      messages: apiMessages,
-      ...(this.options.model.toLowerCase().includes('llama') || this.options.model.toLowerCase().includes('gpt') ? { tools: this.options.tools } : {}),
-      stream: true
-    };
-
-    const traceEntry = {
+    const trace = {
       timestamp: Date.now(),
       model: this.options.model,
-      requestPayload: payload,
-      rawBuffer: '',
+      requestMessages: apiMessages,
+      toolsAttached: (this.options.tools || []).map(t => t.function?.name).filter(Boolean),
+      content: '',
       parsedToolCalls: []
     };
 
-    let response;
+    let fullContent = '';
+    const nativeToolCalls = [];
+
     try {
-      response = await fetch('http://localhost:8789/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+      const events = this.options.streamChat({
+        model: this.options.model,
+        messages: apiMessages,
+        tools: this.options.tools,
         signal: this.abortController.signal
       });
-    } catch (err) {
-      this.updateState({ isStreaming: false, stopReason: 'network_error' });
-      return null;
-    }
 
-    if (!response.ok) {
-      this.updateState({ isStreaming: false, stopReason: 'http_error' });
-      return null;
-    }
-
-    // Node.js or browser stream
-    const reader = response.body.getReader ? response.body.getReader() : null;
-
-    // We implement a robust NDJSON carry buffer
-    let buffer = '';
-    let fullContent = '';
-    let nativeToolCalls = []; // Accumulate fragments correctly
-    let partialNativeCall = null;
-
-    const processChunk = (chunk) => {
-      buffer += chunk;
-      traceEntry.rawBuffer += chunk;
-
-      let newlineIdx;
-      while ((newlineIdx = buffer.indexOf('\n')) !== -1) {
-        const line = buffer.slice(0, newlineIdx).trim();
-        buffer = buffer.slice(newlineIdx + 1);
-
-        if (!line) continue;
-
-        try {
-          const parsed = JSON.parse(line);
-          if (parsed.message?.content) {
-            fullContent += parsed.message.content;
-            this.options.onMessageUpdate(this.agentMsgIndex, { content: parsed.message.content });
-          }
-
-          // Handle streaming native tool calls
-          if (parsed.message?.tool_calls) {
-            // Some models stream fragments of arguments
-            for (const call of parsed.message.tool_calls) {
-              if (call.function.name) {
-                // new call
-                partialNativeCall = { function: { name: call.function.name, arguments: call.function.arguments || '' } };
-                if (call.id) partialNativeCall.id = call.id;
-                nativeToolCalls.push(partialNativeCall);
-              } else if (call.function.arguments && partialNativeCall) {
-                // append arguments
-                partialNativeCall.function.arguments += call.function.arguments;
-              }
-            }
-          }
-        } catch (e) {
-          // ignore invalid json from split lines
+      for await (const event of events) {
+        if (event.type === 'content') {
+          fullContent += event.text;
+          this.options.onMessageUpdate(this.messageId, { content: event.text });
+        } else if (event.type === 'tool_call_start') {
+          nativeToolCalls.push({
+            ...(event.id ? { id: event.id } : {}),
+            function: { name: event.name, arguments: '' }
+          });
+        } else if (event.type === 'tool_call_delta') {
+          const current = nativeToolCalls[nativeToolCalls.length - 1];
+          if (current) current.function.arguments += event.argumentsDelta;
         }
       }
-    };
-
-    try {
-      if (reader) {
-        const decoder = new TextDecoder('utf-8');
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          processChunk(decoder.decode(value, { stream: true }));
-        }
+    } catch (err) {
+      this.updateState({ isStreaming: false });
+      if (err.name === 'AbortError' || this.cancelled) {
+        this.updateState({ stopReason: STOP.CANCELLED });
       } else {
-        // Node 18 native fetch iteration
-        const decoder = new TextDecoder('utf-8');
-        for await (const chunk of response.body) {
-          processChunk(decoder.decode(chunk, { stream: true }));
-        }
+        this.updateState({ stopReason: STOP.ERROR, error: err.message });
+        this.options.onMessageUpdate(this.messageId, { error: err.message });
       }
-      if (buffer.trim()) {
-        try {
-          processChunk('\n'); // Force newline to flush remaining buffer
-        } catch(e) {}
-      }
-    } catch (err) {
-      if (err.name === 'AbortError') {
-        this.updateState({ isStreaming: false, stopReason: 'cancelled' });
-        return null;
-      }
+      trace.error = err.message;
+      this.options.onTraceLog(trace);
+      return null;
     }
 
     this.updateState({ isStreaming: false });
 
-    // We do NOT use the old regex scraper. We use toolProtocol.js resolveToolCalls
-    const allowFallback = (this.options.model || '').toLowerCase().includes('qwen');
-    const { toolCalls: resolvedCalls, cleanedContent } = resolveToolCalls(nativeToolCalls, fullContent, allowFallback);
+    // Text-shaped calls are only trusted when the model was never shown any
+    // schemas — otherwise a native call is the only legitimate channel.
+    const allowFallback = !(this.options.tools || []).length;
+    const { toolCalls, cleanedContent } = resolveToolCalls(nativeToolCalls, fullContent, allowFallback);
 
-    traceEntry.parsedToolCalls = resolvedCalls;
-    this.options.onTraceLog(traceEntry);
+    trace.content = fullContent;
+    trace.parsedToolCalls = toolCalls;
+    this.options.onTraceLog(trace);
 
-    // Only update content cleanly if we stripped protocol noise
     if (fullContent !== cleanedContent) {
-      this.options.onMessageUpdate(this.agentMsgIndex, { content_replace: cleanedContent });
+      this.options.onMessageUpdate(this.messageId, { content_replace: cleanedContent });
     }
 
-    return resolvedCalls;
+    return { toolCalls, content: cleanedContent };
   }
 
-  async run(initialContext, agentMsgIndex) {
-    this.agentMsgIndex = agentMsgIndex;
+  needsApproval(toolName) {
+    const rule = APPROVAL_REQUIRED_BY_LEVEL[this.options.authorityLevel] || (() => true);
+    return rule(toolName);
+  }
+
+  /** Pre-flight checks that refuse a call without ever executing it. */
+  guard(name, args) {
+    if (needsWorkspace(name) && !this.options.workspacePath) {
+      return 'Error: An active workspace is required for this action.';
+    }
+
+    if (name === 'edit_file') {
+      const path = normalizePath(args.filePath);
+      if (!path || !this.sessionReadFiles.has(path)) {
+        return 'Error: You must read the file with read_file before editing it. '
+          + 'This is a strict safety invariant.';
+      }
+    }
+
+    return null;
+  }
+
+  async runToolCall(call) {
+    const { id: callId, name } = call;
+    const args = call.arguments || {};
+
+    this.updateState({ currentActionId: callId });
+    this.options.onMessageUpdate(this.messageId, {
+      tool_execution: { id: callId, name, arguments: args, status: 'running', result: null }
+    });
+
+    let resultString;
+    const blocked = this.guard(name, args);
+
+    if (blocked) {
+      resultString = blocked;
+    } else if (this.needsApproval(name)) {
+      this.updateState({ pendingApproval: { id: callId, name, arguments: args } });
+      const decision = await this.options.requestApproval({ id: callId, name, arguments: args });
+      this.updateState({ pendingApproval: null });
+
+      const approved = typeof decision === 'boolean' ? decision : !!(decision && decision.approved);
+      const edited = decision && typeof decision === 'object' ? decision.editedCall : null;
+
+      if (!approved) {
+        resultString = 'Error: User explicitly denied permission to execute this tool.';
+        this.updateState({ stopReason: STOP.DENIED });
+      } else {
+        const effective = edited ? normalizeEditedCall(edited, call) : call;
+        resultString = await this.execute(effective);
+      }
+    } else {
+      resultString = await this.execute(call);
+    }
+
+    let parsed = null;
+    try {
+      parsed = JSON.parse(resultString);
+    } catch { /* non-JSON tool output */ }
+
+    if (name === 'read_file' && parsed?.success && parsed.contentHash) {
+      const path = normalizePath(args.filePath);
+      if (path) this.sessionReadFiles.set(path, parsed.contentHash);
+    }
+
+    if (parsed) this.options.onToolExecuted(name, args, parsed, callId);
+
+    this.options.onMessageUpdate(this.messageId, {
+      tool_execution_result: { id: callId, status: 'completed', result: resultString }
+    });
+
+    // tool_call_id is what lets the model (and the Anthropic adapter) match a
+    // result to the call that produced it.
+    this.context.push({
+      role: 'tool',
+      tool_call_id: callId,
+      name,
+      content: resultString
+    });
+  }
+
+  async execute(call) {
+    const result = await this.options.executeTool(
+      call.name,
+      call.arguments || {},
+      { workspacePath: this.options.workspacePath }
+    );
+    return typeof result === 'string' ? result : JSON.stringify(result);
+  }
+
+  async run(initialContext, messageId) {
+    this.messageId = messageId;
     this.context = [...initialContext];
-    this.updateState({ stopReason: null, iterationCount: 0 });
-    
-    // Clear sessionReadFiles per new tool loop run
-    if (!this.sessionReadFiles) this.sessionReadFiles = new Map();
-    this.sessionReadFiles.clear();
+    this.updateState({ stopReason: null, error: null, iterationCount: 0 });
 
     while (this.state.iterationCount < this.options.maxIterations) {
+      if (this.cancelled) break;
       this.updateState({ iterationCount: this.state.iterationCount + 1 });
 
-      if (this.state.stopReason === 'cancelled') break;
+      const turn = await this.stream(this.context);
+      if (!turn) return this.state.stopReason; // stream() already set an honest reason
 
-      const calls = await this.streamOllama(this.context);
+      if (this.cancelled) break;
 
-      if (!calls || calls.length === 0) {
-        this.updateState({ stopReason: 'complete' });
-        break; // No more tools to call
+      if (!turn.toolCalls.length) {
+        this.updateState({ stopReason: STOP.COMPLETE });
+        return this.state.stopReason;
       }
 
-      if (this.state.stopReason === 'cancelled') break;
-
-      // Append the assistant's tool call intent to context
       this.context.push({
         role: 'assistant',
-        content: '',
-        tool_calls: toWireToolCalls(calls)
+        content: turn.content || '',
+        tool_calls: toWireToolCalls(turn.toolCalls)
       });
 
       this.updateState({ isExecutingTool: true });
-      let actionIds = new Set();
 
-      for (const call of calls) {
-        if (this.state.stopReason === 'cancelled') break;
-
-        const callId = call.id || crypto.randomUUID();
-        // Deduplication guard
-        if (actionIds.has(callId)) continue;
-        actionIds.add(callId);
-
-        this.updateState({ currentActionId: callId });
-        this.options.onMessageUpdate(agentMsgIndex, {
-          tool_execution: {
-            id: callId,
-            name: (call.function ? call.function.name : call.name),
-            arguments: (call.function ? call.function.arguments : call.arguments),
-            status: 'running',
-            result: null
-          }
-        });
-
-        // Permissions check
-        const needsApproval = this.options.authorityLevel === 'Strict' ||
-          (this.options.authorityLevel === 'Supervised' && ['write_file', 'run_command', 'edit_file', 'create_file', 'delete_file'].includes((call.function ? call.function.name : call.name)));
-
-        const workspaceDependentTools = ['run_command', 'read_file', 'write_file', 'edit_file', 'create_file', 'delete_file', 'list_dir', 'grep_search'];
-
-        let resultString = '';
-        const toolName = (call.function ? call.function.name : call.name);
-        const args = (call.function ? JSON.parse(call.function.arguments || '{}') : (typeof call.arguments === 'string' ? JSON.parse(call.arguments || '{}') : call.arguments));
-        
-        // Simple frontend path normalization (remove leading ./)
-        const normalizedPath = args.filePath ? args.filePath.replace(/\\/g, '/').replace(/^\.\//, '') : '';
-        
-        if (workspaceDependentTools.includes(toolName) && !this.options.workspacePath) {
-          resultString = 'Error: Active workspace is required for this action.';
-        } else if (toolName === 'edit_file' && (!normalizedPath || !this.sessionReadFiles.has(normalizedPath))) {
-          resultString = 'Error: You must read the file (or the relevant portion of it) using read_file before attempting to edit it. This is a strict safety invariant.';
-        } else if (needsApproval) {
-          this.updateState({ pendingApproval: call });
-          const approvalResult = await this.options.requestApproval(call);
-          this.updateState({ pendingApproval: null });
-
-          let approved = false;
-          let finalCall = call;
-          if (typeof approvalResult === 'boolean') {
-            approved = approvalResult;
-          } else if (approvalResult && typeof approvalResult === 'object') {
-            approved = approvalResult.approved;
-            if (approvalResult.editedCall) {
-              finalCall = approvalResult.editedCall;
-            }
-          }
-
-          if (!approved) {
-            resultString = 'Error: User explicitly denied permission to execute this tool.';
-            this.updateState({ stopReason: 'denied' });
-          } else {
-            resultString = await this.options.executeTool(finalCall);
-          }
-        } else {
-          resultString = await this.options.executeTool(call);
-        }
-
-        // Track successfully read files
-        if (toolName === 'read_file' && resultString) {
-          try {
-            const parsed = JSON.parse(resultString);
-            if (parsed.success && parsed.contentHash && normalizedPath) {
-              this.sessionReadFiles.set(normalizedPath, parsed.contentHash);
-            }
-          } catch(e) {}
-        }
-        
-        try {
-          const parsedResult = JSON.parse(resultString);
-          this.options.onToolExecuted(toolName, args, parsedResult);
-        } catch(e) {}
-
-        this.options.onMessageUpdate(agentMsgIndex, {
-          tool_execution_result: {
-            id: callId,
-            status: 'completed',
-            result: resultString
-          }
-        });
-
-        this.context.push({
-          role: 'tool',
-          content: resultString,
-          name: (call.function ? call.function.name : call.name)
-        });
-
-        if (this.state.stopReason === 'denied') break; // stop processing further tools in batch
+      for (const call of turn.toolCalls) {
+        if (this.cancelled) break;
+        await this.runToolCall(call);
+        if (this.state.stopReason === STOP.DENIED) break;
       }
 
       this.updateState({ isExecutingTool: false, currentActionId: null });
 
-      if (this.state.stopReason === 'denied') {
-        break; // break the outer loop
-      }
+      if (this.state.stopReason === STOP.DENIED) break;
+      if (this.cancelled) break;
 
       this.context = anchorToolsForNextTurn(this.context);
     }
 
-    if (this.state.iterationCount >= this.options.maxIterations) {
-      this.updateState({ stopReason: 'max_iterations' });
+    if (!this.state.stopReason) {
+      this.updateState({ stopReason: STOP.MAX_ITERATIONS });
     }
+    return this.state.stopReason;
   }
 }
 
-module.exports = { AgentRuntime };
+function normalizePath(filePath) {
+  if (!filePath) return '';
+  return filePath.replace(/\\/g, '/').replace(/^\.\//, '');
+}
+
+/** Accepts an edited call in either the wire or the resolved shape. */
+function normalizeEditedCall(edited, original) {
+  const src = edited.function || edited;
+  let args = src.arguments;
+  if (typeof args === 'string') {
+    try { args = JSON.parse(args); } catch { args = original.arguments; }
+  }
+  return {
+    id: original.id,
+    name: src.name || original.name,
+    arguments: args || original.arguments
+  };
+}
+
+module.exports = { AgentRuntime, STOP };

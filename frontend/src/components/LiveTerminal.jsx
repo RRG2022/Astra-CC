@@ -1,5 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { XOctagon } from 'lucide-react';
+import { apiFetch } from '../lib/api.js';
+
 
 const LiveTerminal = ({ taskId }) => {
   const terminalRef = useRef(null);
@@ -9,7 +11,7 @@ const LiveTerminal = ({ taskId }) => {
 
   const killTask = async () => {
     try {
-      await fetch(`http://localhost:8789/api/tools/terminal/kill/${taskId}`, { method: 'POST' });
+      await apiFetch(`/api/tools/terminal/kill/${taskId}`, { method: 'POST' });
       setKilled(true);
     } catch(e) {
       console.error(e);
@@ -47,7 +49,7 @@ const LiveTerminal = ({ taskId }) => {
     
     const interval = setInterval(async () => {
       try {
-        const res = await fetch(`http://localhost:8789/api/tools/terminal/stream/${taskId}`);
+        const res = await apiFetch(`/api/tools/terminal/stream/${taskId}`);
         const data = await res.json();
         if (data.output && xtermRef.current) {
           const newChunk = data.output.substring(previousLengthRef.current);

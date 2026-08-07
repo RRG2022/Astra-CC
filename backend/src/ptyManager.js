@@ -4,14 +4,22 @@ const os = require('os');
 const fs = require('fs');
 const path = require('path');
 
-function initPTY(server, isAllowedOrigin) {
+function initPTY(server, isAllowedOrigin, ASTRA_TOKEN) {
   const wss = new WebSocket.Server({
     server,
     path: '/api/pty',
-    verifyClient: ({ origin }, done) => {
-      if (isAllowedOrigin(origin)) return done(true);
-      console.error(`[PTY] Rejected WebSocket connection from origin: ${origin}`);
-      done(false, 403, 'Forbidden: Invalid Origin');
+    verifyClient: ({ origin, req }, done) => {
+      if (!isAllowedOrigin(origin)) {
+        console.error(`[PTY] Rejected WebSocket connection from origin: ${origin}`);
+        return done(false, 403, 'Forbidden: Invalid Origin');
+      }
+      
+      const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+      if (url.searchParams.get('token') !== ASTRA_TOKEN) {
+        return done(false, 401, 'Unauthorized: Invalid Token');
+      }
+      
+      done(true);
     }
   });
 
