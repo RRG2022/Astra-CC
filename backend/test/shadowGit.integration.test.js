@@ -136,3 +136,60 @@ test('Tools requiring a workspace refuse when none is pinned', async () => {
   assert.strictEqual(result.success, false);
   assert.match(result.error, /workspace is required/);
 });
+
+test('read_file slices by offset and limit', async () => {
+  const ws = createWorkspace();
+  const lines = Array.from({ length: 100 }, (_, i) => `line ${i}`);
+  fs.writeFileSync(path.join(ws, 'big.txt'), lines.join('\n'));
+
+  const whole = await call('read_file', { filePath: 'big.txt' }, ws);
+  assert.strictEqual(whole.totalLines, 100);
+  assert.strictEqual(whole.truncated, undefined);
+
+  const slice = await call('read_file', { filePath: 'big.txt', offset: 10, limit: 5 }, ws);
+  assert.strictEqual(slice.content, 'line 10\nline 11\nline 12\nline 13\nline 14');
+  assert.strictEqual(slice.lineCount, 5);
+  assert.strictEqual(slice.totalLines, 100);
+  assert.strictEqual(slice.truncated, true);
+
+  // The hash must cover the whole file, not the slice — edit_file depends on it.
+  assert.strictEqual(slice.contentHash, whole.contentHash);
+});
+
+test('read_file slice hash still satisfies edit_file', async () => {
+  const ws = createWorkspace();
+  fs.writeFileSync(path.join(ws, 'code.js'), 'a\nb\nUNIQUE\nd\ne\n');
+
+  const slice = await call('read_file', { filePath: 'code.js', offset: 0, limit: 2 }, ws);
+  const edited = await call('edit_file', {
+    filePath: 'code.js', oldString: 'UNIQUE', newString: 'CHANGED', contentHash: slice.contentHash
+  }, ws);
+
+  assert.strictEqual(edited.success, true);
+  assert.match(fs.readFileSync(path.join(ws, 'code.js'), 'utf8'), /CHANGED/);
+});
+
+test('read_file rejects an offset past the end with a usable hint', async () => {
+  const ws = createWorkspace();
+  fs.writeFileSync(path.join(ws, 'short.txt'), 'one\ntwo\n');
+
+  const result = await call('read_file', { filePath: 'short.txt', offset: 500 }, ws);
+  assert.strictEqual(result.success, false);
+  assert.match(result.error, /past the end/);
+  assert.match(result.hint, /without an offset/);
+});
+
+test('list_dir hides .astra, which the agent cannot open anyway', async () => {
+  const ws = createWorkspace();
+  fs.writeFileSync(path.join(ws, 'visible.txt'), 'x');
+  fs.mkdirSync(path.join(ws, '.astra', 'sessions'), { recursive: true });
+
+  const listed = await call('list_dir', { directoryPath: '.' }, ws);
+  const names = listed.items.map(i => i.name);
+  assert.ok(names.includes('visible.txt'));
+  assert.ok(!names.includes('.astra'));
+
+  // And it stays unreachable if the model asks for it directly.
+  const denied = await call('list_dir', { directoryPath: '.astra' }, ws);
+  assert.strictEqual(denied.success, false);
+});

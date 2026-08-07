@@ -1,6 +1,15 @@
 const { resolveToolCalls, anchorToolsForNextTurn, toWireToolCalls } = require('./toolProtocol.js');
-const { streamChat } = require('../llm/chat.js');
+const { streamChat, getContextWindow } = require('../llm/chat.js');
 const { executeTool, isMutating, needsWorkspace } = require('../tools');
+const { compactContext, usageSnapshot } = require('./compaction.js');
+const { estimateToolsTokens } = require('./tokens.js');
+
+// Compact once the prompt passes this share of the usable window.
+const COMPACT_AT = parseFloat(process.env.ASTRA_COMPACT_AT || '0.7');
+
+// Headroom left for the model's own reply, so budgeting never squeezes the
+// answer out of the window.
+const RESERVE_FOR_OUTPUT = parseInt(process.env.ASTRA_RESERVE_OUTPUT_TOKENS || '2048', 10);
 
 /**
  * Terminal states. `error` exists so a failed model call can never be reported
@@ -21,6 +30,56 @@ const APPROVAL_REQUIRED_BY_LEVEL = {
   Autonomous: () => false
 };
 
+// A single unbounded tool result can evict the task from the context window.
+// The UI still receives the full result; only the model's copy is capped.
+const MAX_TOOL_RESULT_CHARS = parseInt(process.env.ASTRA_MAX_TOOL_RESULT_CHARS || '10000', 10);
+
+/**
+ * Shrinks an oversized tool result for the model.
+ *
+ * Structured results are trimmed field-wise rather than by slicing the raw
+ * JSON — cutting mid-document would take the contentHash with it, and that
+ * hash is the precondition for the next edit_file.
+ */
+function capForContext(resultString, toolName) {
+  if (resultString.length <= MAX_TOOL_RESULT_CHARS) return resultString;
+
+  let parsed;
+  try {
+    parsed = JSON.parse(resultString);
+  } catch {
+    return resultString.slice(0, MAX_TOOL_RESULT_CHARS)
+      + `\n\n[truncated: ${resultString.length - MAX_TOOL_RESULT_CHARS} more characters]`;
+  }
+
+  if (parsed && typeof parsed.content === 'string') {
+    const budget = Math.max(0, MAX_TOOL_RESULT_CHARS - 500);
+    const kept = parsed.content.slice(0, budget);
+    const shownLines = kept.split('\n').length;
+    return JSON.stringify({
+      ...parsed,
+      content: kept,
+      truncated: true,
+      note: `Content truncated to the first ~${shownLines} lines. `
+        + `Call ${toolName} again with offset and limit to read a specific range.`
+    });
+  }
+
+  if (Array.isArray(parsed?.results) || Array.isArray(parsed?.items)) {
+    const key = Array.isArray(parsed.results) ? 'results' : 'items';
+    const list = parsed[key];
+    const kept = list.slice(0, Math.max(1, Math.floor(list.length / 2)));
+    return capForContext(JSON.stringify({
+      ...parsed,
+      [key]: kept,
+      truncated: true,
+      note: `Showing ${kept.length} of ${list.length} entries. Narrow the query to see more.`
+    }), toolName);
+  }
+
+  return resultString.slice(0, MAX_TOOL_RESULT_CHARS) + '\n\n[truncated]';
+}
+
 class AgentRuntime {
   constructor(options) {
     this.options = {
@@ -36,6 +95,7 @@ class AgentRuntime {
       onMessageUpdate: () => {},
       onTraceLog: () => {},
       onToolExecuted: () => {},
+      onContextUsage: () => {},
       ...options
     };
 
@@ -94,6 +154,7 @@ class AgentRuntime {
         model: this.options.model,
         messages: apiMessages,
         tools: this.options.tools,
+        numCtx: this.contextWindow,
         signal: this.abortController.signal
       });
 
@@ -219,7 +280,7 @@ class AgentRuntime {
       role: 'tool',
       tool_call_id: callId,
       name,
-      content: resultString
+      content: capForContext(resultString, name)
     });
   }
 
@@ -232,6 +293,43 @@ class AgentRuntime {
     return typeof result === 'string' ? result : JSON.stringify(result);
   }
 
+  /**
+   * Fits the context to the model's window before a turn, and reports usage.
+   *
+   * This runs every iteration because tool results — not user messages — are
+   * what actually fill the window during a long task.
+   */
+  async budgetContext() {
+    const window = this.contextWindow
+      || (this.contextWindow = await getContextWindow(this.options.model));
+
+    const toolsTokens = estimateToolsTokens(this.options.tools);
+    const budget = Math.max(1, Math.floor((window - RESERVE_FOR_OUTPUT) * COMPACT_AT) - toolsTokens);
+
+    const result = compactContext(this.context, { budget });
+    if (result.compacted) {
+      this.context = result.messages;
+      this.options.onTraceLog({
+        timestamp: Date.now(),
+        type: 'compaction',
+        strategy: result.strategy,
+        tokensBefore: result.before,
+        tokensAfter: result.after
+      });
+    }
+
+    this.options.onContextUsage({
+      ...usageSnapshot({
+        messages: this.context,
+        tools: this.options.tools,
+        contextWindow: window,
+        reserveForOutput: RESERVE_FOR_OUTPUT
+      }),
+      compacted: result.compacted,
+      model: this.options.model
+    });
+  }
+
   async run(initialContext, messageId) {
     this.messageId = messageId;
     this.context = [...initialContext];
@@ -241,12 +339,19 @@ class AgentRuntime {
       if (this.cancelled) break;
       this.updateState({ iterationCount: this.state.iterationCount + 1 });
 
+      await this.budgetContext();
       const turn = await this.stream(this.context);
       if (!turn) return this.state.stopReason; // stream() already set an honest reason
 
       if (this.cancelled) break;
 
       if (!turn.toolCalls.length) {
+        // The final reply must land in context. Dropping it means the next
+        // turn has no record of what the assistant said, so it repeats itself
+        // and the conversation cannot refer back to its own answers.
+        if (turn.content) {
+          this.context.push({ role: 'assistant', content: turn.content });
+        }
         this.updateState({ stopReason: STOP.COMPLETE });
         return this.state.stopReason;
       }

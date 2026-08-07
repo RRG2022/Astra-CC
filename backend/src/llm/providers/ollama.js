@@ -2,8 +2,8 @@ const { LlmError, lineStream } = require('../stream');
 
 const baseUrl = () => process.env.ASTRA_OLLAMA_URL || 'http://localhost:11434';
 
-const options = () => ({
-  num_ctx: parseInt(process.env.ASTRA_NUM_CTX || '8192', 10),
+const options = (numCtx) => ({
+  num_ctx: numCtx || parseInt(process.env.ASTRA_NUM_CTX || '8192', 10),
   temperature: parseFloat(process.env.ASTRA_TEMPERATURE || '0.1'),
   top_p: 0.9,
   repeat_penalty: 1.05
@@ -27,12 +27,12 @@ async function post(body, signal) {
   });
 }
 
-async function* stream({ model, messages, tools, signal }) {
+async function* stream({ model, messages, tools, signal, numCtx }) {
   const payload = {
     model,
     messages,
     stream: true,
-    options: options(),
+    options: options(numCtx),
     keep_alive: keepAlive(),
     ...(tools && tools.length ? { tools } : {})
   };

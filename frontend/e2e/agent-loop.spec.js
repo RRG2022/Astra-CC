@@ -46,6 +46,29 @@ test.describe('agent session', () => {
     await expect(page.getByText('There is one file.')).toBeVisible();
   });
 
+  test('shows the context meter once the server reports usage', async ({ page }) => {
+    const mock = createSessionMock();
+    mock.phase(
+      ev.messageStart(),
+      {
+        event: 'context_usage',
+        data: { used: 5200, budget: 6144, contextWindow: 8192, percent: 85, compacted: true }
+      },
+      ev.content('Answered with a nearly full window.'),
+      ev.completed('complete')
+    );
+
+    await installBaseRoutes(page);
+    await mock.install(page);
+
+    await sendPrompt(page, 'a long conversation');
+
+    const meter = page.getByRole('progressbar', { name: 'Context window usage' });
+    await expect(meter).toBeVisible();
+    await expect(meter).toHaveAttribute('aria-valuenow', '85');
+    await expect(page.getByText('5.2k/6.1k')).toBeVisible();
+  });
+
   test('surfaces a failed turn instead of showing an empty reply', async ({ page }) => {
     const mock = createSessionMock();
     mock.phase(

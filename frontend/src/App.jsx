@@ -325,6 +325,7 @@ function App() {
     tools: TOOLS,
     workspacePath,
     authorityLevel,
+    persona: selectedPersona,
     maxIterations: 10
   });
 
@@ -411,14 +412,9 @@ function App() {
     ]);
 
     try {
-      let systemPrompt = PERSONAS[selectedPersona].prompt;
-      if (workspacePath) systemPrompt += '\nYour active workspace is located at: ' + workspacePath;
-      const currentContext = [
-        { role: 'system', content: systemPrompt },
-        ...currentMessages,
-        userMessage
-      ];
-      await runtime.run(currentContext, assistantMessageId);
+      // The system prompt (persona rules + the workspace's AGENTS.md) is built
+      // server-side, so the client sends only the conversation.
+      await runtime.run([...currentMessages, userMessage], assistantMessageId);
     } catch (err) {
       console.error('Chat error:', err);
       onMessageUpdate(assistantMessageId, { error: err.message || 'Error generating response.' });
@@ -500,6 +496,7 @@ function App() {
             onApprove={runtime.approve}
             onDeny={runtime.deny}
             agentError={runtime.error}
+            contextUsage={runtime.contextUsage}
             attachments={attachments}
             removeAttachment={removeAttachment}
             PERSONAS={PERSONAS}

@@ -64,7 +64,11 @@ test('extract reads a whole-message tool call', () => {
 
 test('extract reads llama `parameters` from a whole message', () => {
   const { calls } = extractToolCallsFromText('{"name": "read_file", "parameters": {"filePath": "upload.js"}}');
-  assert.deepEqual(calls[0], { name: 'read_file', arguments: { filePath: 'upload.js' } });
+  assert.deepEqual(calls[0], {
+    name: 'read_file',
+    arguments: { filePath: 'upload.js' },
+    source: 'whole' // trust level: the whole message was the call
+  });
 });
 
 test('extract reads a fenced block', () => {
@@ -128,4 +132,39 @@ test('anchor appends a continuation turn after a tool result', () => {
 test('anchor is a no-op when the last turn is not a tool result', () => {
   const ctx = [{ role: 'user', content: 'go' }];
   assert.equal(anchorToolsForNextTurn(ctx), ctx);
+});
+
+test('a whole-message tool call is honoured even when native schemas were sent', () => {
+  // Observed with qwen2.5-coder via Ollama: it writes the call as the entire
+  // message instead of emitting a native tool_call. Ignoring it meant the turn
+  // completed having done nothing.
+  const content = '{\n  "name": "list_dir",\n  "arguments": {\n    "directoryPath": "."\n  }\n}';
+  const { toolCalls, cleanedContent } = resolveToolCalls([], content, false);
+
+  assert.equal(toolCalls.length, 1);
+  assert.equal(toolCalls[0].name, 'list_dir');
+  assert.deepEqual(toolCalls[0].arguments, { directoryPath: '.' });
+  assert.equal(cleanedContent, '');
+});
+
+test('a fenced call is ignored when the model had real schemas', () => {
+  // A fenced block is also how a model documents a call while explaining
+  // itself; honouring it would turn an explanation into an action.
+  const content = 'Here is what I ran:\n\n```json\n{"name":"run_command","arguments":{"command":"rm -rf /"}}\n```';
+  const { toolCalls } = resolveToolCalls([], content, false);
+
+  assert.equal(toolCalls.length, 0);
+});
+
+test('a fenced call is honoured only when the model had no schemas at all', () => {
+  const content = '```json\n{"name":"list_dir","arguments":{"directoryPath":"."}}\n```';
+
+  assert.equal(resolveToolCalls([], content, true).toolCalls.length, 1);
+  assert.equal(resolveToolCalls([], content, false).toolCalls.length, 0);
+});
+
+test('a tool call quoted inside prose is still never executed', () => {
+  const content = 'I previously called {"name":"run_command","arguments":{"command":"ls"}} to check.';
+  assert.equal(resolveToolCalls([], content, true).toolCalls.length, 0);
+  assert.equal(resolveToolCalls([], content, false).toolCalls.length, 0);
 });

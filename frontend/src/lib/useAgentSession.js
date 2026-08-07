@@ -8,7 +8,8 @@ const IDLE_STATE = {
   stopReason: null,
   error: null,
   currentActionId: null,
-  iterationCount: 0
+  iterationCount: 0,
+  contextUsage: null
 };
 
 /**
@@ -20,7 +21,7 @@ const IDLE_STATE = {
 export function useAgentSession(options) {
   const {
     onMessageUpdate, onTraceLog, onToolExecuted,
-    model, tools, workspacePath, authorityLevel, maxIterations
+    model, tools, workspacePath, authorityLevel, maxIterations, persona
   } = options;
 
   const [state, setState] = useState(IDLE_STATE);
@@ -33,7 +34,7 @@ export function useAgentSession(options) {
   }, [onMessageUpdate, onTraceLog, onToolExecuted]);
 
   const configRef = useRef({});
-  configRef.current = { model, tools, workspacePath, authorityLevel, maxIterations };
+  configRef.current = { model, tools, workspacePath, authorityLevel, maxIterations, persona };
 
   const initSession = useCallback(async (context) => {
     const cfg = configRef.current;
@@ -47,6 +48,7 @@ export function useAgentSession(options) {
           authorityLevel: cfg.authorityLevel,
           tools: cfg.tools,
           maxIterations: cfg.maxIterations,
+          persona: cfg.persona,
           initialContext: context
         })
       });
@@ -78,6 +80,10 @@ export function useAgentSession(options) {
     es.addEventListener('approval_requested', (e) => {
       const { callId, name, arguments: args } = JSON.parse(e.data);
       setState(prev => ({ ...prev, pendingApproval: { id: callId, name, arguments: args } }));
+    });
+
+    es.addEventListener('context_usage', (e) => {
+      setState(prev => ({ ...prev, contextUsage: JSON.parse(e.data) }));
     });
 
     es.addEventListener('trace_log', (e) => {

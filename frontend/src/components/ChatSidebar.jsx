@@ -2,6 +2,7 @@ import React, { useRef, useEffect, useState } from 'react';
 import { Send, Paperclip, Mic, MicOff, Copy, Edit2, RefreshCw, AlertTriangle, Check, X, Brain } from 'lucide-react';
 import MarkdownRenderer from './MarkdownRenderer';
 import ToolExecution from './ToolExecution';
+import ContextMeter from './ContextMeter';
 import { useWorkspaceStore } from '../lib/stores/useWorkspaceStore';
 import { useAgentStore } from '../lib/stores/useAgentStore';
 
@@ -14,6 +15,7 @@ const ChatSidebar = ({
   onApprove,
   onDeny,
   agentError,
+  contextUsage,
   attachments,
   removeAttachment,
   PERSONAS,
@@ -227,6 +229,12 @@ const ChatSidebar = ({
                 <button onClick={() => removeAttachment(i)} style={{ background: 'transparent', border: 'none', padding: 0, marginLeft: '0.25rem', color: 'var(--text-secondary)', cursor: 'pointer' }}><X size={12} /></button>
               </div>
             ))}
+          </div>
+        )}
+
+        {contextUsage && (
+          <div style={{ display: 'flex', justifyContent: 'flex-end', padding: '0 0.25rem 0.25rem' }}>
+            <ContextMeter usage={contextUsage} />
           </div>
         )}
 

@@ -51,7 +51,7 @@ function resolveProvider(model) {
  * Streams a chat completion as normalized events, regardless of provider.
  * See llm/stream.js for the event shapes.
  */
-async function* streamChat({ model, messages, tools, signal }) {
+async function* streamChat({ model, messages, tools, signal, numCtx }) {
   const target = resolveProvider(model);
 
   switch (target.provider) {
@@ -62,7 +62,7 @@ async function* streamChat({ model, messages, tools, signal }) {
       yield* anthropic.stream({ ...target, messages, tools, signal });
       return;
     default:
-      yield* ollama.stream({ model: target.modelId, messages, tools, signal });
+      yield* ollama.stream({ model: target.modelId, messages, tools, signal, numCtx });
   }
 }
 
@@ -89,6 +89,46 @@ async function listModels() {
  */
 const toolSupportCache = new Map();
 
+// Cloud context windows are published; local models are probed via /api/show.
+const CLOUD_CONTEXT_WINDOWS = {
+  'gpt-4o': 128000,
+  'gemini-1.5-pro': 1000000,
+  'claude-opus-5': 1000000,
+  'claude-sonnet-5': 1000000
+};
+
+// Ollama's own default when a model declares nothing. Assuming more than this
+// is how the original context problem happened.
+const FALLBACK_CONTEXT_WINDOW = parseInt(process.env.ASTRA_NUM_CTX || '8192', 10);
+
+const contextWindowCache = new Map();
+
+/**
+ * The model's real context window.
+ *
+ * Previously this was a single hardcoded constant for every model, so a 32k
+ * model was budgeted as if it were 8k and a 4k model as if it were 8k — the
+ * second being the case where the task silently falls out of the window.
+ */
+async function getContextWindow(model) {
+  if (CLOUD_CONTEXT_WINDOWS[model]) return CLOUD_CONTEXT_WINDOWS[model];
+  if (contextWindowCache.has(model)) return contextWindowCache.get(model);
+
+  let window = FALLBACK_CONTEXT_WINDOW;
+  try {
+    const info = await ollama.showModel(model);
+    // Keys are architecture-prefixed, e.g. "qwen2.context_length".
+    const key = Object.keys(info.model_info || {}).find(k => k.endsWith('.context_length'));
+    const declared = key ? Number(info.model_info[key]) : NaN;
+    if (Number.isFinite(declared) && declared > 0) window = declared;
+  } catch {
+    // Unreachable /api/show — keep the conservative fallback.
+  }
+
+  contextWindowCache.set(model, window);
+  return window;
+}
+
 async function supportsTools(model) {
   if (CLOUD_MODELS[model]) return true;
   if (toolSupportCache.has(model)) return toolSupportCache.get(model);
@@ -106,4 +146,7 @@ async function supportsTools(model) {
   return supported;
 }
 
-module.exports = { streamChat, listModels, supportsTools, resolveProvider, CLOUD_MODELS };
+module.exports = {
+  streamChat, listModels, supportsTools, getContextWindow, resolveProvider,
+  CLOUD_MODELS, FALLBACK_CONTEXT_WINDOW
+};

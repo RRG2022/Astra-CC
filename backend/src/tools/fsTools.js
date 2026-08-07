@@ -54,7 +54,7 @@ function atomicWrite(absolutePath, content) {
 
 async function readFile(args, ctx) {
   const workspacePath = requireWorkspace(ctx);
-  const { filePath } = args;
+  const { filePath, offset, limit } = args;
   if (!filePath) throw badRequest('filePath is required');
 
   const absolutePath = resolveSafePath(workspacePath, filePath);
@@ -65,9 +65,38 @@ async function readFile(args, ctx) {
     throw badRequest('Cannot read binary files.');
   }
 
-  const content = fs.readFileSync(absolutePath, 'utf8');
-  const contentHash = crypto.createHash('sha256').update(content).digest('hex');
-  return { success: true, content, contentHash };
+  const full = fs.readFileSync(absolutePath, 'utf8');
+
+  // The hash always covers the whole file: it is the edit_file precondition,
+  // so a hash over a slice would let a stale edit through.
+  const contentHash = crypto.createHash('sha256').update(full).digest('hex');
+
+  const lines = full.split('\n');
+  const totalLines = lines.length;
+
+  if (offset === undefined && limit === undefined) {
+    return { success: true, content: full, contentHash, totalLines };
+  }
+
+  const start = Math.max(0, Math.floor(offset || 0));
+  if (start >= totalLines) {
+    throw badRequest(
+      `offset ${start} is past the end of the file (${totalLines} lines)`,
+      'Read without an offset first to see how long the file is.'
+    );
+  }
+
+  const end = limit === undefined ? totalLines : Math.min(totalLines, start + Math.max(0, Math.floor(limit)));
+
+  return {
+    success: true,
+    content: lines.slice(start, end).join('\n'),
+    contentHash,
+    totalLines,
+    offset: start,
+    lineCount: end - start,
+    truncated: end < totalLines || start > 0
+  };
 }
 
 async function writeFile(args, ctx) {
@@ -166,14 +195,18 @@ async function listDir(args, ctx) {
     throw badRequest(`Path is not a directory: ${args.directoryPath}`);
   }
 
-  const items = fs.readdirSync(absolutePath).map(file => {
-    try {
-      const stats = fs.statSync(path.join(absolutePath, file));
-      return { name: file, isDirectory: stats.isDirectory(), size: stats.size };
-    } catch {
-      return { name: file, isDirectory: false, size: 0, error: true };
-    }
-  });
+  const items = fs.readdirSync(absolutePath)
+    // .astra holds Astra's own state (shadow git, session records). resolveSafePath
+    // refuses to open it, so listing it only invites calls that must fail.
+    .filter(file => file !== '.astra')
+    .map(file => {
+      try {
+        const stats = fs.statSync(path.join(absolutePath, file));
+        return { name: file, isDirectory: stats.isDirectory(), size: stats.size };
+      } catch {
+        return { name: file, isDirectory: false, size: 0, error: true };
+      }
+    });
 
   return { success: true, path: absolutePath, items };
 }

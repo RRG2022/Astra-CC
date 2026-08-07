@@ -58,15 +58,29 @@ function callKey(call) {
 
 const FENCE_RE = /```(?:json|tool_call|tool)?[ \t]*\r?\n([\s\S]*?)\r?\n[ \t]*```/g;
 
+/**
+ * Extracts tool calls the model wrote as text rather than as native calls.
+ *
+ * Two sources, with very different trust levels:
+ *
+ *   'whole' — the entire message is nothing but tool-call JSON. There is no
+ *     prose to confuse it with, so this is unambiguous intent and is always
+ *     safe to honour.
+ *   'fence' — a fenced block inside a larger message. This is also how a model
+ *     *documents* a call when explaining itself, so honouring it can turn an
+ *     explanation into an action. Only trusted when the model was never given
+ *     real schemas and has no other way to ask.
+ */
 function extractToolCallsFromText(content) {
   const calls = [];
   const spans = [];
   const text = (content || '').trim();
   if (!text) return { calls, spans };
 
-  const consider = (objects, sourceSpan) => {
+  const consider = (objects, sourceSpan, source) => {
     const normalized = objects.map(o => normalizeCall(o.value)).filter(Boolean);
     if (!normalized.length || normalized.length !== objects.length) return false;
+    for (const call of normalized) call.source = source;
     calls.push(...normalized);
     spans.push(sourceSpan);
     return true;
@@ -76,7 +90,7 @@ function extractToolCallsFromText(content) {
     const objects = scanJsonObjects(text);
     const covered = objects.reduce((n, o) => n + o.raw.length, 0);
     const gap = text.replace(/\s+/g, '').length - objects.reduce((n, o) => n + o.raw.replace(/\s+/g, '').length, 0);
-    if (objects.length && covered > 0 && gap === 0 && consider(objects, text)) {
+    if (objects.length && covered > 0 && gap === 0 && consider(objects, text, 'whole')) {
       return { calls, spans };
     }
   }
@@ -86,7 +100,7 @@ function extractToolCallsFromText(content) {
   while ((match = FENCE_RE.exec(text)) !== null) {
     const inner = match[1].trim();
     if (!inner.startsWith('{') || !inner.endsWith('}')) continue;
-    consider(scanJsonObjects(inner), match[0]);
+    consider(scanJsonObjects(inner), match[0], 'fence');
   }
 
   return { calls, spans };
@@ -114,8 +128,14 @@ function resolveToolCalls(nativeToolCalls, content, allowFallback = false, mintI
   const nativeCount = toolCalls.length;
   const { calls, spans } = extractToolCallsFromText(content);
 
-  if (allowFallback && nativeCount === 0) {
+  // A native call always wins; text is only consulted when there wasn't one.
+  if (nativeCount === 0) {
     for (const call of calls) {
+      // A whole-message call is unambiguous and always honoured. A fenced one
+      // may be documentation, so it needs the model to have had no other way
+      // to ask — otherwise explaining a call could re-run it.
+      if (call.source === 'fence' && !allowFallback) continue;
+
       const key = callKey(call);
       if (seen.has(key)) continue;
       seen.add(key);
