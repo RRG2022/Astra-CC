@@ -21,6 +21,17 @@ const RULES_FILE = 'permissions.json';
 const EFFECTS = new Set(['allow', 'ask', 'deny']);
 
 /**
+ * Paths are compared with forward slashes regardless of platform.
+ *
+ * On Windows a model will happily emit `src\\utils\\a.js`, and a rule written
+ * as `src/**` would then silently fail to match — a permission rule that
+ * quietly stops applying is worse than no rule at all.
+ */
+function normalizeSubjectPath(value) {
+  return String(value || '').replace(/\\/g, '/').replace(/^\.\//, '');
+}
+
+/**
  * The string a rule's pattern is matched against. Each tool has one field that
  * actually determines what it will touch.
  */
@@ -30,8 +41,8 @@ function subjectOf(tool, args = {}) {
     case 'read_file':
     case 'write_file':
     case 'edit_file':
-    case 'rewind_file': return String(args.filePath || '');
-    case 'list_dir': return String(args.directoryPath || '');
+    case 'rewind_file': return normalizeSubjectPath(args.filePath);
+    case 'list_dir': return normalizeSubjectPath(args.directoryPath);
     case 'grep_search': return String(args.query || '');
     default: return '';
   }
@@ -185,6 +196,6 @@ function suggestPattern(tool, args = {}) {
 }
 
 module.exports = {
-  evaluate, subjectOf, globToRegExp, ruleMatches, normalizeRule, PATH_LIKE_TOOLS,
+  evaluate, subjectOf, normalizeSubjectPath, globToRegExp, ruleMatches, normalizeRule, PATH_LIKE_TOOLS,
   loadRules, saveRules, addRule, suggestPattern, rulesPath, RULES_FILE
 };

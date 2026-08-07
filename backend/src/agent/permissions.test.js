@@ -153,3 +153,26 @@ test('the suggested pattern generalizes a command to its verb', () => {
   assert.equal(suggestPattern('run_command', { command: 'npm test -- --watch' }), 'npm*');
   assert.equal(suggestPattern('write_file', { filePath: 'src/a.js' }), 'src/a.js');
 });
+
+test('Windows-style paths match rules written with forward slashes', () => {
+  // A model on Windows emits backslashes; a rule that silently stops matching
+  // is worse than no rule, so subjects are normalized before comparison.
+  const result = evaluate({
+    tool: 'write_file',
+    args: { filePath: 'src\\utils\\helper.js' },
+    rules: [rule('deny', 'write_file', 'src/**')],
+    authorityLevel: 'Autonomous'
+  });
+  assert.equal(result.decision, 'deny');
+  assert.equal(result.subject, 'src/utils/helper.js');
+});
+
+test('a leading ./ does not defeat a rule', () => {
+  const result = evaluate({
+    tool: 'read_file',
+    args: { filePath: './src/a.js' },
+    rules: [rule('deny', 'read_file', 'src/**')],
+    authorityLevel: 'Autonomous'
+  });
+  assert.equal(result.decision, 'deny');
+});
