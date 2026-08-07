@@ -1,0 +1,18 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "astra-backend",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["backend/index.js"],
+      "port": 8789
+    },
+    {
+      "name": "astra-frontend",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "frontend", "run", "dev", "--", "--port", "5173", "--strictPort"],
+      "port": 5173,
+      "url": "http://localhost:5173"
+    }
+  ]
+}

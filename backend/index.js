@@ -5,10 +5,15 @@ const crypto = require('crypto');
 const { createApp } = require('./src/app');
 const { initPTY } = require('./src/ptyManager');
 
-// Generate and sync auth token
+// Generate and sync auth token. Written via temp+rename like every other file
+// the app owns: on Windows a plain overwrite of a dot-file that carries the
+// Hidden attribute (which is how a checkout copied from macOS/SMB arrives)
+// fails with EPERM, and the backend would not boot at all.
 const ASTRA_TOKEN = crypto.randomBytes(32).toString('hex');
 const envPath = path.resolve(__dirname, '../frontend/.env.local');
-fs.writeFileSync(envPath, `VITE_ASTRA_TOKEN=${ASTRA_TOKEN}\n`);
+const envTmp = `${envPath}.${process.pid}.tmp`;
+fs.writeFileSync(envTmp, `VITE_ASTRA_TOKEN=${ASTRA_TOKEN}\n`);
+fs.renameSync(envTmp, envPath);
 
 const PORT = process.env.PORT || 8789;
 

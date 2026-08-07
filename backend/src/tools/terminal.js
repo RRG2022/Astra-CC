@@ -10,6 +10,15 @@ const OUTPUT_CAP = 1000000;      // 1MB of retained output per task
 const BACKGROUND_AFTER_MS = 5000; // hand back control, keep the process running
 const PRUNE_AFTER_MS = 60000;
 
+/**
+ * Forget a finished task's retained output after a grace period. Unref'd: this
+ * is bookkeeping, and a pending prune must never be the reason a process that
+ * has nothing left to do stays alive.
+ */
+function schedulePrune(taskId) {
+  setTimeout(() => activeTasks.delete(taskId), PRUNE_AFTER_MS).unref();
+}
+
 function requireWorkspace(ctx) {
   if (!ctx || !ctx.workspacePath) {
     throw badRequest('An active workspace is required for this action.');
@@ -61,7 +70,7 @@ async function runCommand(args, ctx) {
       append(`\nError: Failed to start process: ${err.message}\n`);
       task.done = true;
       settleWith({ success: false, error: `Failed to start process: ${err.message}`, code: 'ESPAWN' });
-      setTimeout(() => activeTasks.delete(taskId), PRUNE_AFTER_MS);
+      schedulePrune(taskId);
     });
 
     child.on('close', (code) => {
@@ -73,7 +82,7 @@ async function runCommand(args, ctx) {
         stdout: task.output.trim(),
         stderr: ''
       });
-      setTimeout(() => activeTasks.delete(taskId), PRUNE_AFTER_MS);
+      schedulePrune(taskId);
     });
 
     task.timer = setTimeout(() => {
