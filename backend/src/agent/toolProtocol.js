@@ -103,17 +103,32 @@ function extractToolCallsFromText(content) {
   }
 
   FENCE_RE.lastIndex = 0;
+  const fenced = [];
   let match;
   while ((match = FENCE_RE.exec(text)) !== null) {
     const inner = match[1].trim();
     if (!inner.startsWith('{') || !inner.endsWith('}')) continue;
 
-    // A message that is *nothing but* one fenced call is the model asking for
-    // the tool — there is no surrounding explanation for it to be documenting.
-    // A fence embedded in prose is the dangerous case: that is how a model
-    // shows what it ran while explaining itself.
-    const isEntireMessage = match[0].trim() === text;
-    consider(scanJsonObjects(inner), match[0], isEntireMessage ? 'whole' : 'fence');
+    const objects = scanJsonObjects(inner);
+    const normalized = objects.map(o => normalizeCall(o.value)).filter(Boolean);
+    fenced.push({
+      span: match[0],
+      objects,
+      isCall: objects.length > 0 && normalized.length === objects.length
+    });
+  }
+
+  // A message that is *nothing but* fenced calls has no explanation for them to
+  // be documenting, so it is the model asking — whether it wrote one fence or
+  // three. A fence with prose around it is the dangerous case: that is how a
+  // model shows what it ran while explaining itself. Anything else in the
+  // message at all, including a fenced block of ordinary JSON, keeps them
+  // gated.
+  const leftover = fenced.reduce((rest, f) => rest.replace(f.span, ''), text).trim();
+  const onlyCalls = fenced.length > 0 && !leftover && fenced.every(f => f.isCall);
+
+  for (const f of fenced) {
+    consider(f.objects, f.span, onlyCalls ? 'whole' : 'fence');
   }
 
   return { calls, spans, blocks };

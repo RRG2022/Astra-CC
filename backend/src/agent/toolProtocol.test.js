@@ -182,6 +182,36 @@ test('a tool call quoted inside prose is still never executed', () => {
   assert.equal(resolveToolCalls([], content, false).toolCalls.length, 0);
 });
 
+test('a message of nothing but fenced calls runs all of them', () => {
+  // Observed live from qwen2.5-coder asked for two tools in one turn: it wrote
+  // two ```json fences back to back and no prose at all. The old rule only
+  // recognised a *single* fence filling the message, so each of these looked
+  // like documentation and the turn did nothing.
+  const content = '```json\n{"name":"update_tasks","arguments":{"tasks":[]}}\n```\n'
+    + '```json\n{"name":"list_dir","arguments":{"directoryPath":"."}}\n```';
+  const { toolCalls, cleanedContent } = resolveToolCalls([], content, false);
+
+  assert.deepEqual(toolCalls.map(c => c.name), ['update_tasks', 'list_dir']);
+  assert.equal(cleanedContent, '');
+});
+
+test('prose alongside several fenced calls still gates all of them', () => {
+  // One sentence of explanation is enough to make these documentation again.
+  const content = 'Here is what I ran:\n\n```json\n{"name":"run_command","arguments":{"command":"ls"}}\n```\n'
+    + '```json\n{"name":"run_command","arguments":{"command":"rm -rf /"}}\n```';
+
+  assert.equal(resolveToolCalls([], content, false).toolCalls.length, 0);
+});
+
+test('a fenced call beside a fenced blob of data stays gated', () => {
+  // The message is doing something other than asking, so the conservative
+  // reading wins.
+  const content = '```json\n{"name":"read_file","arguments":{"filePath":"a.js"}}\n```\n'
+    + '```json\n{"version":"1.0.0","private":true}\n```';
+
+  assert.equal(resolveToolCalls([], content, false).toolCalls.length, 0);
+});
+
 test('a refused fenced call stays in the reply instead of vanishing', () => {
   // Observed live from qwen2.5-coder: "Now I will write this to summary.md"
   // followed by a fenced write_file. The call is correctly not run, but it was
